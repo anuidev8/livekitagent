@@ -1,7 +1,13 @@
 import pytest
 from livekit.agents import inference, llm
 
-from agent import INSTRUCTIONS, MAIN_INSTRUCTIONS, Assistant, NovaAssistant, NOVA_INSTRUCTIONS
+from agent import (
+    INSTRUCTIONS,
+    MAIN_INSTRUCTIONS,
+    NOVA_INSTRUCTIONS,
+    Assistant,
+    NovaAssistant,
+)
 from tasks import AnalysisTask, AttractTask
 
 
@@ -22,13 +28,14 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     }
     assert NovaAssistant is Assistant
     assert INSTRUCTIONS is MAIN_INSTRUCTIONS is NOVA_INSTRUCTIONS
-    assert "on_enter" not in Assistant.__dict__
+    assert "on_enter" in Assistant.__dict__
 
     nova_lower = NOVA_INSTRUCTIONS.lower()
     assert "huella digital" in nova_lower
     assert "seti" in nova_lower
     assert "spokencontent" in nova_lower
     assert "no inventes" in nova_lower or "únicamente" in nova_lower
+    assert "nunca digas que no ves" in nova_lower
     assert "livekit" not in nova_lower
     assert "get_session_state first" not in nova_lower
     # Forbidden product framing must not appear as instructions to invent a game.
@@ -77,6 +84,16 @@ def test_ui_sync_attract_scripts_cover_three_cards() -> None:
     assert ATTRACT_CARD_SCRIPTS[0]["title"] == "Gestos"
     assert ATTRACT_CARD_SCRIPTS[1]["title"] == "Toque"
     assert ATTRACT_CARD_SCRIPTS[2]["title"] == "Voz"
+
+
+def test_rpc_client_exposes_retry_knobs() -> None:
+    import inspect
+
+    from rpc_client import rpc
+
+    sig = inspect.signature(rpc)
+    assert "retries" in sig.parameters
+    assert sig.parameters["retries"].default == 2
 
 
 @pytest.mark.skip(reason="Requires LiveKit Inference credits; Nova is the only voice backend.")

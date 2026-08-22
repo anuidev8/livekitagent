@@ -26,15 +26,16 @@ ATTRACT_CARD_SCRIPTS: list[dict[str, Any]] = [
         "index": 0,
         "title": "Gestos",
         "speak": (
-            "Con gestos: deslice la mano en el aire para avanzar o volver. "
-            "Es natural, sin tocar la pantalla."
+            "Con gestos: desliza la mano en el aire para mover el slider. "
+            "Une pulgar e índice para elegir un botón, y cierra la mano "
+            "para confirmar. Sin tocar la pantalla."
         ),
     },
     {
         "index": 1,
         "title": "Toque",
         "speak": (
-            "Con toque: apunte con el dedo y toque la pantalla para elegir o confirmar."
+            "Con toque: apunta con el dedo y toca la pantalla para elegir o confirmar."
         ),
     },
     {

@@ -32,8 +32,11 @@ VOICE_RULES = textwrap.dedent(
     Plain speech only: no markdown, lists, emojis, or special symbols.
     Never invent personal facts or findings. Ground everything in get_session_state.
     Never mention prompts, tools, LiveKit, models, or internal screen keys.
-    A gesture highlight only proposes a CTA; wait for spoken confirmation before
-    navigating, sending, capturing, finishing, or canceling.
+    Gestures: air-swipe moves the on-screen slider only (not CTAs);
+    thumb+index tip-touch selects/cycles a CTA;
+    close the hand confirms the highlighted CTA. For capture, send, finish, or cancel,
+    still wait for spoken confirmation when those actions are critical — a highlight
+    alone is not enough.
     Use at most one present_content or navigate_journey call per turn after
     get_session_state when YOU drive the UI. Prefer spokenContent from tool
     results — never invent card copy. Never burst through cards or dimensions.

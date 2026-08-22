@@ -2,160 +2,349 @@
   <img src="./.github/assets/livekit-mark.png" alt="LiveKit logo" width="100" height="100">
 </a>
 
-# LiveKit Agents Starter - Python
+# Huella Guide — LiveKit Python Agent
 
-A complete starter project for building voice AI apps with [LiveKit Agents for Python](https://github.com/livekit/agents) and [LiveKit Cloud](https://cloud.livekit.io/).
+Voice guide for the **SETI Huella Digital** kiosk. This is a [LiveKit Agents](https://github.com/livekit/agents) Python worker that joins a LiveKit room, listens/speaks with **Amazon Nova Sonic 2** (AWS Bedrock realtime), and drives the Next.js UI through **client RPC tools**.
 
-The starter project includes:
+Companion frontend: `huella-digital` (registers the matching RPC methods on the browser participant).
 
-- A simple voice AI assistant, ready for extension and customization
-- A voice AI pipeline built on [LiveKit Inference](https://docs.livekit.io/agents/models/inference), providing zero-configuration access to [models](https://docs.livekit.io/agents/models) from top labs
-  - Uses the fast, open-weight Gemma 4 31B model, [hosted by LiveKit](https://docs.livekit.io/agents/models/llm/livekit/) and tuned for optimal performance in voice AI, as the default LLM
-  - Uses Fish Audio S2.1 Pro for TTS, which renders the inline delivery markup that expressive mode relies on
-  - Supports more than 50 models from OpenAI, Cartesia, Deepgram, and other providers
-  - Access to a wide range of other models, including [Realtime models](https://docs.livekit.io/agents/models/realtime), through extensive plugin ecosystem
-- Expressive mode, enabled by default: the framework injects the TTS provider's markup guide into the LLM prompt, so the model emits inline delivery tags (emotion, pacing, non-verbal sounds) that the TTS renders and the transcript never shows
-- Eval suite based on the LiveKit Agents [testing & evaluation framework](https://docs.livekit.io/agents/start/testing/)
-- [LiveKit Turn Detector](https://docs.livekit.io/agents/logic/turns/turn-detector/), an end-of-turn model that listens to the user's audio directly, combining semantic understanding with acoustic cues for state-of-the-art accuracy across 14 languages
-- [Background voice cancellation](https://docs.livekit.io/transport/media/noise-cancellation/)
-- Deep session insights from LiveKit [Agent Observability](https://docs.livekit.io/deploy/observability/)
-- A Dockerfile ready for [production deployment to LiveKit Cloud](https://docs.livekit.io/deploy/agents/)
+**Deep dive (connection, UI/UX rendering, voice → elements, business logic):**  
+[VOICE_UI_DEEP_DIVE.md](./VOICE_UI_DEEP_DIVE.md)
 
-This starter app is compatible with any [custom web/mobile frontend](https://docs.livekit.io/frontends/) or [telephony](https://docs.livekit.io/telephony/).
+---
 
-## Using coding agents
+## How the agent is built (Python)
 
-This project is designed to work with coding agents like [Claude Code](https://claude.com/product/claude-code), [Cursor](https://www.cursor.com/), and [Codex](https://openai.com/codex/).
+Everything that runs in production lives in `src/`. The live path is intentionally small: one entry file, one agent class, one RPC helper.
 
-For your convenience, LiveKit offers both a CLI and an [MCP server](https://docs.livekit.io/reference/developer-tools/docs-mcp/) that can be used to browse and search its documentation. The [LiveKit CLI](https://docs.livekit.io/intro/basics/cli/) (`lk docs`) works with any coding agent that can run shell commands. Install it for your platform:
-
-**macOS:**
-
-```console
-brew install livekit-cli
+```
+src/
+├── agent.py          # Entrypoint: AgentServer, Nova Sonic session, Assistant tools
+├── rpc_client.py     # LiveKit perform_rpc → kiosk frontend
+└── tasks/            # Legacy phase tasks (not used by the current Nova path)
 ```
 
-**Linux:**
+### 1. Entrypoint and process model
 
-```console
-curl -sSL https://get.livekit.io/cli | bash
+`src/agent.py` is both the library and the CLI entrypoint:
+
+```python
+server = AgentServer()
+
+@server.rtc_session(agent_name=AGENT_NAME)
+async def my_agent(ctx: JobContext):
+    ...
+
+if __name__ == "__main__":
+    cli.run_app(server)
 ```
 
-**Windows:**
+| Piece | Role |
+|-------|------|
+| `AgentServer` | Long-running worker that connects to LiveKit and accepts jobs |
+| `@server.rtc_session(agent_name=...)` | Job entrypoint when a room requests this agent by name |
+| `cli.run_app(server)` | Starts the worker (`console` / `dev` / `start`) |
+| `JobContext` (`ctx`) | Room handle, logging fields, and `ctx.connect()` to join media |
 
-```console
-winget install LiveKit.LiveKitCLI
+Agent name comes from env (default `huella-guide`):
+
+```python
+AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "huella-guide")
 ```
 
-The `lk docs` subcommand requires version 2.15.0 or higher. Check your version with `lk --version` and update if needed. Once installed, your coding agent can search and browse LiveKit documentation directly from the terminal:
+The frontend (or dispatch rules) must request that same name so this worker is assigned to the room.
 
-```console
-lk docs search "voice agents"
-lk docs get-page /agents/start/voice-ai-quickstart
+### 2. Environment and config
+
+On import, credentials are loaded from `.env.local`:
+
+```python
+from dotenv import load_dotenv
+load_dotenv(".env.local")
 ```
 
-See the [Using coding agents](https://docs.livekit.io/intro/coding-agents/) guide for more details, including MCP server setup.
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `LIVEKIT_URL` | LiveKit Cloud WebSocket URL | — |
+| `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Worker auth | — |
+| `LIVEKIT_AGENT_NAME` | Dispatch name | `huella-guide` |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Bedrock (Nova Sonic) | — |
+| `AWS_REGION` | Bedrock region | `us-east-1` |
+| `NOVA_VOICE` | Spanish voice: `lupe` or `carlos` | `lupe` |
+| `NOVA_TURN_DETECTION` | `HIGH` / `MEDIUM` / `LOW` | `MEDIUM` |
 
-The project includes a complete [AGENTS.md](AGENTS.md) file for these assistants. You can modify this file to suit your needs. To learn more about this file, see [https://agents.md](https://agents.md).
+See `.env.example`. Without AWS keys the session still starts, but Bedrock calls fail (a warning is logged).
 
-## Dev Setup
+### 3. Voice stack: Amazon Nova Sonic 2 (realtime)
 
-Create a project from this template with the LiveKit CLI (recommended):
+This agent does **not** use a separate STT → LLM → TTS pipeline. It uses one **realtime** model that handles audio in and out:
 
-```bash
-lk cloud auth
-lk agent init my-agent --template agent-starter-python
+```python
+def _build_nova_realtime() -> aws.realtime.RealtimeModel:
+    return aws.realtime.RealtimeModel.with_nova_sonic_2(
+        voice=NOVA_VOICE,
+        turn_detection=NOVA_TURN_DETECTION,
+        region=AWS_REGION,
+        tool_choice="auto",
+        generate_reply_timeout=20.0,
+    )
 ```
 
-The CLI clones the template and configures your environment. Then follow the rest of this guide from [Run the agent](#run-the-agent).
+| Setting | Meaning |
+|---------|---------|
+| `with_nova_sonic_2(...)` | LiveKit AWS plugin helper for Nova Sonic 2 |
+| `voice` | Spoken Spanish persona (`lupe` / `carlos`) |
+| `turn_detection` | How aggressively Nova ends the user turn |
+| `tool_choice="auto"` | Model may call tools when needed (set on the model, not per reply) |
+| `generate_reply_timeout=20.0` | Wait up to 20s for a reply generation |
 
-<details>
-<summary>Alternative: Manual setup without the CLI</summary>
+Dependencies (`pyproject.toml`):
 
-Clone the repository and install dependencies to a virtual environment:
+- `livekit-agents` — core Agent / AgentSession / CLI
+- `livekit-plugins-aws[realtime]` — Nova Sonic realtime
+- `aws-sdk-bedrock-runtime` — Bedrock runtime client
+- `livekit-plugins-ai-coustics` — noise / voice enhancement on mic input
+- `python-dotenv` — `.env.local`
+
+### 4. Session wiring
+
+Inside the RTC session entrypoint:
+
+```python
+session = AgentSession(
+    llm=_build_nova_realtime(),
+    max_tool_steps=4,
+)
+
+await session.start(
+    agent=Assistant(),
+    room=ctx.room,
+    room_options=room_io.RoomOptions(
+        audio_input=room_io.AudioInputOptions(
+            noise_cancellation=ai_coustics.audio_enhancement(
+                model=ai_coustics.EnhancerModel.QUAIL_VF_L
+            ),
+        ),
+    ),
+)
+
+await ctx.connect()
+```
+
+Flow:
+
+1. Build an `AgentSession` whose `llm` is the Nova realtime model.
+2. Cap tool chaining at **4** steps per turn (`max_tool_steps=4`).
+3. Start the session with a fresh `Assistant()` and attach room I/O.
+4. Enhance inbound audio with **ai_coustics** (`QUAIL_VF_L`) before Nova hears it.
+5. `ctx.connect()` joins the LiveKit room and media can flow.
+
+Nova handles barge-in / interruption itself; there is no separate VAD/STT/TTS pipeline in this file.
+
+Logging context is attached for observability:
+
+```python
+ctx.log_context_fields = {
+    "room": ctx.room.name,
+    "agent": AGENT_NAME,
+    "voice_backend": "nova",
+    "voice_model": "amazon.nova-2-sonic",
+    "nova_voice": NOVA_VOICE,
+}
+```
+
+### 5. The `Assistant` agent class
+
+```python
+class Assistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(instructions=NOVA_INSTRUCTIONS)
+
+    @function_tool
+    async def get_session_state(self, context: RunContext) -> str: ...
+
+    @function_tool
+    async def present_content(self, context: RunContext, ...) -> str: ...
+
+    @function_tool
+    async def navigate_journey(self, context: RunContext, ...) -> str: ...
+
+    @function_tool
+    async def set_control_channel(self, context: RunContext, ...) -> str: ...
+```
+
+Design choices:
+
+- **Single agent**, fixed tool set — no handoffs / `AgentTask` in the live path.
+- Warm `on_enter` + `generate_reply` so Nova greets quickly, then continues from tools + UI `[pantalla:]` cues.
+- Tools are registered with `@function_tool` on the class; Nova decides when to call them (`tool_choice="auto"`).
+- `NovaAssistant` is an alias of `Assistant` for older tests/deploys.
+
+#### System instructions (`NOVA_INSTRUCTIONS`)
+
+Short Spanish prompt kept free of investigation / surveillance framing so Bedrock content filters do not block session init. Contract:
+
+1. On every visitor turn or `[pantalla:]` message → call `get_session_state`.
+2. If a visible element must be focused → call `present_content`.
+3. Speak **only** from `spokenContent`, `narration`, or `title` returned by tools — never invent product copy.
+4. Call `navigate_journey` only when the user confirms an action listed in `availableActions`.
+5. Call `set_control_channel` only when the user asks to enable/disable voice or gestures.
+6. Never mention tools, models, or internals to the visitor.
+
+Product detail text lives in the Next.js RPC responses (`spokenContent`), not in this prompt.
+
+### 6. Client tools via LiveKit RPC (`rpc_client.py`)
+
+Each tool does **not** implement kiosk logic in Python. It forwards to the browser participant:
+
+```python
+async def rpc(method: str, payload: dict | None = None, timeout: float = 8.0) -> str:
+    room = get_job_context().room
+    participant = next(iter(room.remote_participants.values()), None)
+    if participant is None:
+        raise ToolError("No hay participante en la sala...")
+    return await room.local_participant.perform_rpc(
+        destination_identity=participant.identity,
+        method=method,
+        payload=json.dumps(payload or {}),
+        response_timeout=timeout,
+    )
+```
+
+| Step | What happens |
+|------|----------------|
+| `get_job_context().room` | Current job’s LiveKit room |
+| First remote participant | Assumed kiosk / frontend client |
+| `perform_rpc(...)` | Calls a method registered on that client |
+| Return value | JSON string from the frontend → fed back to Nova |
+| Errors | Wrapped as `ToolError` so the model can recover |
+
+#### Tool contract (must match the frontend)
+
+| Tool | Parameters | Purpose |
+|------|------------|---------|
+| `get_session_state` | none | Current screen, phase, profile, `availableActions`, focus, scores, visible copy |
+| `present_content` | `target`, `index=-1`, `dimension_id=""`, `section=""` | Focus one visible UI element before narrating |
+| `navigate_journey` | `action`, `dimension_id=""` | Run a allowed journey action (`advance`, `back`, `open_detail`, …) |
+| `set_control_channel` | `channel`, `enabled` | Toggle `voice` or `gesture` input |
+
+Python uses snake_case args; the RPC payload maps to the frontend’s camelCase (`dimensionId`, etc.).
+
+Optional Builder mirror: `AGENT_BUILDER_SETUP.md` + `AGENT_BUILDER_INSTRUCTIONS.txt` describe the same tool contract for LiveKit Agent Builder (not required for this code agent).
+
+### 7. End-to-end turn (what actually happens)
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Room as LiveKit room
+    participant Agent as Python worker (agent.py)
+    participant Nova as Amazon Nova Sonic 2
+    participant UI as Next.js kiosk (RPC)
+
+    User->>Room: Audio (or UI [pantalla:] cue)
+    Room->>Agent: Media / data
+    Agent->>Nova: Realtime audio + instructions + tools
+    Nova->>Agent: function_tool (e.g. get_session_state)
+    Agent->>UI: perform_rpc
+    UI-->>Agent: JSON (spokenContent, availableActions, ...)
+    Agent-->>Nova: Tool result string
+    Nova->>Agent: Speech audio (+ optional more tools)
+    Agent->>Room: Agent audio track
+    Room->>User: Heard reply
+```
+
+Typical turn:
+
+1. Visitor speaks (or UI injects a screen cue).
+2. Nova decides to call `get_session_state` → RPC → frontend JSON.
+3. Optionally `present_content` to sync highlight.
+4. Nova speaks using only content from the tool results.
+5. If the visitor confirms a listed action → `navigate_journey`.
+
+### 8. `src/tasks/` (legacy / unused in live Nova path)
+
+`src/tasks/` still contains phase specialists (`AttractTask`, `WelcomeTask`, `AnalysisTask`, …) used by older supervisor/handoff designs and by some unit tests. The **current** `Assistant` in `agent.py` does **not** hand off to those tasks. Tests assert the Nova agent keeps a stable four-tool set without handoffs.
+
+### 9. Tests
 
 ```console
-cd agent-starter-python
+uv run pytest
+```
+
+Core checks in `tests/test_agent.py`:
+
+- `Assistant` exposes exactly the four tools above
+- Prompt aliases (`INSTRUCTIONS` / `MAIN_INSTRUCTIONS` / `NOVA_INSTRUCTIONS`) stay aligned
+- No `on_enter` on the Nova agent
+- Prompt stays short and free of forbidden product framing
+
+---
+
+## Dev setup
+
+```console
+cd huella-guide
 uv sync
+cp .env.example .env.local
+# fill LIVEKIT_* and AWS_* keys
 ```
 
-Sign up for [LiveKit Cloud](https://cloud.livekit.io/) then set up the environment by copying `.env.example` to `.env.local` and filling in the required keys:
-
-- `LIVEKIT_URL`
-- `LIVEKIT_API_KEY`
-- `LIVEKIT_API_SECRET`
-
-You can load the LiveKit environment automatically using the [LiveKit CLI](https://docs.livekit.io/intro/basics/cli/):
+Load LiveKit Cloud credentials with the CLI if you prefer:
 
 ```bash
 lk cloud auth
 lk app env --write --destination .env.local
 ```
 
-</details>
+Python: `>=3.12, <3.15` (see `pyproject.toml`). Package manager: **uv**.
 
 ## Run the agent
 
-Run this command to speak to your agent directly in your terminal:
+Speak in the terminal:
 
 ```console
 uv run python src/agent.py console
 ```
 
-To run the agent for use with a frontend or telephony, use the `dev` command:
+Local worker for the kiosk frontend:
 
 ```console
 uv run python src/agent.py dev
 ```
 
-In production, use the `start` command:
+Production-style worker:
 
 ```console
 uv run python src/agent.py start
 ```
 
-## Frontend & Telephony
-
-Get started quickly with our pre-built frontend starter apps, or add telephony support:
-
-| Platform | Link | Description |
-|----------|----------|-------------|
-| **Web** | [`livekit-examples/agent-starter-react`](https://github.com/livekit-examples/agent-starter-react) | Web voice AI assistant with React & Next.js |
-| **iOS/macOS** | [`livekit-examples/agent-starter-swift`](https://github.com/livekit-examples/agent-starter-swift) | Native iOS, macOS, and visionOS voice AI assistant |
-| **Flutter** | [`livekit-examples/agent-starter-flutter`](https://github.com/livekit-examples/agent-starter-flutter) | Cross-platform voice AI assistant app |
-| **React Native** | [`livekit-examples/voice-assistant-react-native`](https://github.com/livekit-examples/voice-assistant-react-native) | Native mobile app with React Native & Expo |
-| **Android** | [`livekit-examples/agent-starter-android`](https://github.com/livekit-examples/agent-starter-android) | Native Android app with Kotlin & Jetpack Compose |
-| **Web Embed** | [`livekit-examples/agent-starter-embed`](https://github.com/livekit-examples/agent-starter-embed) | Voice AI widget for any website |
-| **Telephony** | [Documentation](https://docs.livekit.io/telephony/) | Add inbound or outbound calling to your agent |
-
-For advanced customization, see the [complete frontend guide](https://docs.livekit.io/frontends/).
-
-## Tests and evals
-
-This project includes a complete suite of evals, based on the LiveKit Agents [testing & evaluation framework](https://docs.livekit.io/agents/start/testing/). To run them, use `pytest`.
+Format / lint:
 
 ```console
-uv run pytest
+uv run ruff format
+uv run ruff check
 ```
 
-## Using this template repo for your own project
+## Deploy
 
-Once you've started your own project based on this repo, you should:
+`Dockerfile` builds with uv, pre-downloads plugin files (`livekit.agents download-files`), and starts:
 
-1. **Check in your `uv.lock`**: This file is currently untracked for the template, but you should commit it to your repository for reproducible builds and proper configuration management. (The same applies to `livekit.toml`, if you run your agents in LiveKit Cloud)
+```dockerfile
+CMD ["uv", "run", "src/agent.py", "start"]
+```
 
-2. **Remove the git tracking test**: Delete the "Check files not tracked in git" step from `.github/workflows/tests.yml` since you'll now want this file to be tracked. These are just there for development purposes in the template repo itself.
+Cloud project / agent id: `livekit.toml`. Deploy guide: [LiveKit Agents production](https://docs.livekit.io/deploy/agents/).
 
-3. **Add your own repository secrets**: You must [add secrets](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-what-your-workflow-does/using-secrets-in-github-actions) for `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` so that the tests can run in CI.
+Ensure production secrets include LiveKit **and** AWS Bedrock credentials, plus `LIVEKIT_AGENT_NAME` matching frontend dispatch.
 
-## Deploying to production
+## Docs for coding agents
 
-This project is production-ready and includes a working `Dockerfile`. To deploy it to LiveKit Cloud or another environment, see the [deploying to production](https://docs.livekit.io/deploy/agents/) guide.
-
-## Self-hosted LiveKit
-
-You can also self-host LiveKit instead of using LiveKit Cloud. See the [self-hosting](https://docs.livekit.io/transport/self-hosting/local/) guide for more information. If you choose to self-host, you'll need to also use [model plugins](https://docs.livekit.io/agents/models/#plugins) instead of LiveKit Inference and will need to remove the [LiveKit Cloud noise cancellation](https://docs.livekit.io/transport/media/noise-cancellation/) plugin.
+- Project conventions: [AGENTS.md](AGENTS.md)
+- LiveKit CLI docs: `lk docs search "nova sonic"`, `lk docs get-page /agents/models/realtime/plugins/nova-sonic`
+- Nova Sonic plugin: https://docs.livekit.io/agents/models/realtime/plugins/nova-sonic/
+- Sessions / tools: https://docs.livekit.io/agents/logic/sessions/ · https://docs.livekit.io/agents/logic/tools/
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
