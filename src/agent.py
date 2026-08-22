@@ -58,6 +58,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     3) Habla únicamente con spokenContent, narration o title que
        devuelvan las herramientas. Puedes suavizar el ritmo (pausas)
        sin inventar datos del producto.
+    Los [pantalla:] traen una pista de operador (a menudo redactada por
+    CopilotKit) sobre step/phase/identity/focus. Úsala para foco y timing;
+    habla solo spokenContent de las tools; no inventes pantallas ni datos
+    de perfil.
 
     Targets válidos de present_content (obligatorio usar estos strings):
     - attract_tour — solo index -1 = título «¿Sabe qué dice…?».
