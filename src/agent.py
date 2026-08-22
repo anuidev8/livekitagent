@@ -65,27 +65,33 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       si las pides, la UI salta a práctica).
     - gesture_practice — práctica interactiva (slider + tip-touch +
       cerrar la mano). Ir directo aquí tras el saludo de attract.
-    - welcome_preparation — index 0|1|2 casillas; index 3 = listo con nombre.
-    - intro_step — index 0|1|2 tarjetas «Así funciona» (número + título).
-    - intro_dimension — index 0..4 araña / dimensiones (cómo funcionan).
-    - result_dimension — index 0..4 resultados.
+    - welcome_preparation — index 0|1|2 casillas de carga. La UI pone
+      phase=ready sola; no fuerces el nombre.
+    - intro_step — index 0|1|2 (0=primero, 1=segundo, 2=tercero).
+    - intro_dimension — preferir dimensionId (higiene, serp, ssi,
+      influencia, arquitectura). El orden del araña NO es el de resultados.
+    - result_dimension — index 0..4 o dimensionId (orden de resultados).
     - detail_dimension — con dimensionId.
     - detail_section — section strengths|opportunities|action_plan.
     - recommendation_item — index del plan.
     Prohibido: target "attract", "intro", "analysis", "dimension" u otros
     inventados — fallan y la UI no cambia.
 
+    Si present_content o navigate_journey fallan (ok:false): llama
+    get_session_state, usa availableActions, y reintenta. No digas que
+    vas a mostrar una pantalla hasta que la herramienta confirme ok.
+
     Flujo pantalla de inicio (attract):
     1) present_content(attract_tour, index=-1) → título en pantalla.
     2) Narra spokenContent con tono profesional (no «Hola» seco) e invita
        a practicar los gestos. No ofrezcas un tour de tarjetas.
-    3) Si acepta, pide empezar, o confirma el CTA: present_content
-       gesture_practice (o navigate_journey practice_gestures /
-       start_experience si están en availableActions).
+    3) Si acepta: present_content(gesture_practice) PRIMERO; habla el
+       spokenContent que devuelva. O navigate_journey practice_gestures /
+       start_experience si están en availableActions.
     4) PROHIBIDO present_content attract_tour con index 0, 1 o 2.
-    PROHIBIDO en attract: decir el nombre, rol o empresa del visitante.
-    El nombre solo se dice en welcome cuando phase=ready / present_content
-    welcome_preparation index=3 (vista con nombre).
+    PROHIBIDO decir el nombre, rol o empresa hasta welcome phase=ready.
+    También PROHIBIDO en gesture_practice, nfc, validation y welcome
+    preparing.
 
     Flujo práctica de gestos (gesture_practice):
     - Narra spokenContent una vez y deja practicar (slider, tip-touch,
@@ -103,16 +109,15 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     - Sin nombre, rol ni empresa mientras preparing.
 
     Flujo bienvenida lista (welcome phase=ready):
-    1) present_content(welcome_preparation, index=3) si aún no está enfocado.
-    2) Habla spokenContent con el nombre, tono profesional. Ofrece empezar
-       solo si start_experience está en availableActions.
+    1) En cuanto la vista con nombre aparece, saluda INMEDIATAMENTE con
+       spokenContent (Bienvenido/a + nombre). No esperes otra confirmación.
+    2) Ofrece empezar solo si start_experience está en availableActions.
 
     Flujo «Así funciona» (intro):
-    1) present_content(intro_step, 0) → narra TODO el spokenContent con
-       ritmo lento y suave → espera → pregunta si sigue.
-    2) Igual con index 1 y 2. No avances hasta terminar cada narración.
-    3) Pregunta si quiere ver las cinco dimensiones; si acepta:
-       present_content(intro_dimension, 0..4) una por turno, igual de pausado.
+    1) present_content(intro_step, 0) → primero; narra completo y despacio.
+    2) «Segundo» = index 1; «tercero» = index 2. No uses 2 para el segundo.
+    3) Dimensiones: present_content(intro_dimension, dimension_id="higiene")
+       (o serp, ssi, influencia, arquitectura). No inventes el índice.
     4) Ofrece empezar el análisis con availableActions.
 
     Nunca digas que no ves la pantalla. Si una herramienta falla o llega
@@ -220,11 +225,12 @@ class Assistant(Agent):
         section: str = "",
     ) -> str:
         """Enfoca UN elemento visible. Targets EXACTOS: attract_tour
-        (solo index -1 título; index≥0 va a práctica), gesture_practice
-        (práctica rápida), welcome_preparation (0..2 prep, 3 listo),
-        intro_step (0..2), intro_dimension (0..4), result_dimension (0..4),
-        detail_dimension (+dimension_id), detail_section (+section),
-        recommendation_item. Habla con el spokenContent devuelto.
+        (solo index -1 título; index≥0 va a práctica), gesture_practice,
+        welcome_preparation (0..2 prep), intro_step (0=primero, 1=segundo,
+        2=tercero), intro_dimension (mejor dimension_id=higiene|serp|…),
+        result_dimension, detail_dimension (+dimension_id), detail_section
+        (+section), recommendation_item. Habla con el spokenContent
+        devuelto. Si ok=false, get_session_state y reintenta.
         Nunca uses target=attract|intro|analysis.
         """
         return await rpc(
