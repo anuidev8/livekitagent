@@ -5,6 +5,7 @@ from agent import (
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
+    NOVA_SESSION_REFRESH_SECONDS,
     Assistant,
     NovaAssistant,
 )
@@ -94,6 +95,14 @@ def test_rpc_client_exposes_retry_knobs() -> None:
     sig = inspect.signature(rpc)
     assert "retries" in sig.parameters
     assert sig.parameters["retries"].default == 2
+
+
+def test_nova_session_recycles_before_the_aws_timeout() -> None:
+    """The SDK must see the app's renewal policy before its module import."""
+    from livekit.plugins.aws.experimental.realtime import realtime_model
+
+    assert NOVA_SESSION_REFRESH_SECONDS == 360
+    assert realtime_model.MAX_SESSION_DURATION_SECONDS == 360
 
 
 @pytest.mark.skip(reason="Requires LiveKit Inference credits; Nova is the only voice backend.")

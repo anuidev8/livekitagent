@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -19,13 +20,27 @@ from livekit.agents import (
     function_tool,
     room_io,
 )
-from livekit.plugins import ai_coustics, aws
+from livekit.plugins import ai_coustics
 
 from rpc_client import rpc
 
-logger = logging.getLogger("agent")
-
+# The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
+# imported. Load local configuration and publish our renewal policy first;
+# doing this after importing ``livekit.plugins.aws`` silently has no effect.
 load_dotenv(".env.local")
+
+NOVA_SESSION_REFRESH_SECONDS = int(
+    os.getenv("NOVA_SESSION_REFRESH_SECONDS", "360")
+)
+if not 60 <= NOVA_SESSION_REFRESH_SECONDS <= 420:
+    raise ValueError(
+        "NOVA_SESSION_REFRESH_SECONDS must be between 60 and 420 seconds "
+        "so renewal occurs safely before Nova Sonic's 480-second limit"
+    )
+os.environ["LK_SESSION_MAX_DURATION"] = str(NOVA_SESSION_REFRESH_SECONDS)
+aws = importlib.import_module("livekit.plugins.aws")
+
+logger = logging.getLogger("agent")
 
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "huella-guide")
 
@@ -313,22 +328,15 @@ NovaAssistant = Assistant
 def _build_nova_realtime() -> aws.realtime.RealtimeModel:
     """Amazon Nova Sonic 2 — LiveKit AWS realtime plugin.
 
-    Session-recycle note: with static AWS_ACCESS_KEY_ID/SECRET credentials
-    Bedrock enforces a hard 360-second cap per bidirectional stream, after
-    which the plugin silently tears down and re-opens the WebSocket
-    (_session_recycle_timer).  This causes a ~1-2 s freeze mid-session and
-    resets temperature/top_p to defaults.
+    AWS limits each bidirectional Nova stream to 480 seconds. LiveKit's AWS
+    plugin keeps this AgentSession (and therefore the room participant) alive,
+    renews only its internal Bedrock stream, and replays its retained system
+    instructions and chat context. ``NOVA_SESSION_REFRESH_SECONDS`` is mapped
+    to the plugin's import-time ``LK_SESSION_MAX_DURATION`` setting above; the
+    default 360 seconds leaves a two-minute safety margin.
 
-    To push the cap to 3600 s (or remove it entirely with IAM role + STS):
-      - Use an IAM Role with STS and set AWS_SESSION_TOKEN in the environment.
-      - OR keep static creds and accept the 360 s recycle, but pin
-        temperature/top_p here so at least the model behavior stays consistent
-        across the recycle.
-
-    session_refresh_interval: explicitly set below to avoid the silent
-    mid-conversation reset.  Value must be < 360 for static creds — we use
-    355 s to trigger a proactive recycle a few seconds before AWS forces it,
-    which is slightly less disruptive than a hard timeout.
+    The plugin bounds its completionEnd wait before continuing cleanup, so the
+    application must not reconnect the LiveKit room or replace AgentSession.
     """
     return aws.realtime.RealtimeModel.with_nova_sonic_2(
         voice=NOVA_VOICE,
@@ -354,6 +362,7 @@ async def my_agent(ctx: JobContext):
         "voice_backend": "nova",
         "voice_model": "amazon.nova-2-sonic",
         "nova_voice": NOVA_VOICE,
+        "nova_session_refresh_seconds": NOVA_SESSION_REFRESH_SECONDS,
     }
 
     if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
@@ -370,7 +379,12 @@ async def my_agent(ctx: JobContext):
         max_tool_steps=8,
     )
 
-    logger.info("Starting Nova Sonic voice=%s region=%s", NOVA_VOICE, AWS_REGION)
+    logger.info(
+        "Starting Nova Sonic voice=%s region=%s refresh=%ss",
+        NOVA_VOICE,
+        AWS_REGION,
+        NOVA_SESSION_REFRESH_SECONDS,
+    )
 
     await session.start(
         agent=Assistant(),
