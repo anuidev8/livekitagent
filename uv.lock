@@ -37,7 +37,7 @@ requires-dist = [
     { name = "aws-sdk-bedrock-runtime", specifier = ">=0.2.0,<0.10.0" },
     { name = "livekit-agents", specifier = ">=1.7.0" },
     { name = "livekit-plugins-ai-coustics", specifier = "~=0.2" },
-    { name = "livekit-plugins-aws", extras = ["realtime"], specifier = ">=1.7.0" },
+    { name = "livekit-plugins-aws", extras = ["realtime"], specifier = "==1.7.0" },
     { name = "python-dotenv" },
 ]
 

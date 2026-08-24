@@ -101,7 +101,8 @@ def _build_nova_realtime() -> aws.realtime.RealtimeModel:
 Dependencies (`pyproject.toml`):
 
 - `livekit-agents` — core Agent / AgentSession / CLI
-- `livekit-plugins-aws[realtime]` — Nova Sonic realtime
+- `livekit-plugins-aws[realtime]==1.7.0` — Nova Sonic realtime, pinned while
+  `src/nova_session_continuation.py` provides the recycle-timer compatibility fix
 - `aws-sdk-bedrock-runtime` — Bedrock runtime client
 - `livekit-plugins-ai-coustics` — noise / voice enhancement on mic input
 - `python-dotenv` — `.env.local`
@@ -140,6 +141,27 @@ Flow:
 5. `ctx.connect()` joins the LiveKit room and media can flow.
 
 Nova handles barge-in / interruption itself; there is no separate VAD/STT/TTS pipeline in this file.
+
+### Nova stream continuation
+
+AWS closes an individual Nova Sonic realtime stream after roughly eight minutes.
+`NOVA_SESSION_REFRESH_SECONDS` defaults to `360`, so the agent replaces only the
+internal Bedrock stream while the LiveKit room and participant remain connected.
+
+LiveKit AWS 1.7.0 can cancel the task performing that replacement when it arms
+the next recycle timer. `src/nova_session_continuation.py` installs a narrow,
+version-gated fix before any realtime session is created. After a successful
+renewal, logs should include all of the following:
+
+```text
+[SESSION] Armed next Nova recycle timer without cancelling the active renewal
+[SESSION] Session recycled successfully
+Starting audio input processing loop
+```
+
+Review and remove the compatibility module before upgrading
+`livekit-plugins-aws`; the application intentionally refuses to start with an
+untested plugin version.
 
 Logging context is attached for observability:
 

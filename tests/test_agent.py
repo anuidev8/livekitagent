@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from livekit.agents import inference, llm
 
@@ -103,6 +105,59 @@ def test_nova_session_recycles_before_the_aws_timeout() -> None:
 
     assert NOVA_SESSION_REFRESH_SECONDS == 360
     assert realtime_model.MAX_SESSION_DURATION_SECONDS == 360
+
+
+@pytest.mark.asyncio
+async def test_nova_recycle_does_not_cancel_the_active_renewal() -> None:
+    """Arming the next timer from a recycle must not cancel that recycle."""
+    from livekit.plugins.aws.experimental.realtime import realtime_model
+
+    next_timer_started = asyncio.Event()
+
+    class FakeSession:
+        _session_recycle_task: asyncio.Task[None] | None = None
+
+        def _calculate_session_duration(self) -> float:
+            return 360.0
+
+        async def _session_recycle_timer(self, duration: float) -> None:
+            assert duration == 360.0
+            next_timer_started.set()
+
+    fake = FakeSession()
+    active_renewal = asyncio.current_task()
+    assert active_renewal is not None
+    fake._session_recycle_task = active_renewal
+
+    realtime_model.RealtimeSession._start_session_recycle_timer(fake)  # type: ignore[arg-type]
+
+    assert not active_renewal.cancelling()
+    assert fake._session_recycle_task is not active_renewal
+    await asyncio.wait_for(next_timer_started.wait(), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_nova_recycle_cancels_a_stale_independent_timer() -> None:
+    """The compatibility fix retains upstream stale-timer cleanup."""
+    from livekit.plugins.aws.experimental.realtime import realtime_model
+
+    stale_timer = asyncio.create_task(asyncio.sleep(60))
+
+    class FakeSession:
+        _session_recycle_task: asyncio.Task[None] | None = stale_timer
+
+        def _calculate_session_duration(self) -> float:
+            return 360.0
+
+        async def _session_recycle_timer(self, duration: float) -> None:
+            return None
+
+    fake = FakeSession()
+    realtime_model.RealtimeSession._start_session_recycle_timer(fake)  # type: ignore[arg-type]
+
+    await asyncio.sleep(0)
+    assert stale_timer.cancelled()
+    await fake._session_recycle_task
 
 
 @pytest.mark.skip(reason="Requires LiveKit Inference credits; Nova is the only voice backend.")

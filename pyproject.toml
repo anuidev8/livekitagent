@@ -11,7 +11,9 @@ requires-python = ">=3.12, <3.15"
 dependencies = [
     "livekit-agents>=1.7.0",
     "livekit-plugins-ai-coustics~=0.2",
-    "livekit-plugins-aws[realtime]>=1.7.0",
+    # nova_session_continuation.py patches a 1.7.0 recycler race. Review and
+    # remove that compatibility fix before upgrading this dependency.
+    "livekit-plugins-aws[realtime]==1.7.0",
     "aws-sdk-bedrock-runtime>=0.2.0,<0.10.0",
     "python-dotenv",
 ]

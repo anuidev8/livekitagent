@@ -22,6 +22,7 @@ from livekit.agents import (
 )
 from livekit.plugins import ai_coustics
 
+from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
@@ -39,6 +40,7 @@ if not 60 <= NOVA_SESSION_REFRESH_SECONDS <= 420:
     )
 os.environ["LK_SESSION_MAX_DURATION"] = str(NOVA_SESSION_REFRESH_SECONDS)
 aws = importlib.import_module("livekit.plugins.aws")
+install_nova_session_continuation_fix()
 
 logger = logging.getLogger("agent")
 
