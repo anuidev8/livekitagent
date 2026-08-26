@@ -248,11 +248,16 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Tarjeta 0: Cómo interactuar — gestos (deslizar derecha), toque y voz
       Tarjeta 1: Las 5 dimensiones — nombres + una línea cada una (alto nivel)
       Tarjeta 2: Qué recibirás — informe, radar, recomendaciones, envío por correo
+    present_content devuelve facts.points (anclas cortas) — NUNCA un párrafo
+    completo para leer. Compón 2-3 oraciones; PROHIBIDO pegar points como lista
+    o recitar el texto de la tarjeta; PROHIBIDO narrar la misma tarjeta dos veces.
     ORDEN OBLIGATORIO para CADA tarjeta (0 y 1):
       (A) present_content(intro_step, index=N) — una sola vez.
-      (B) HABLA — 2-3 oraciones tuyas, ritmo cómodo (no precipitado);
-          parafrasea, NO recites el párrafo de la UI palabra por palabra.
-      (C) PARA — NO llames navigate_journey; la UI pasa a la siguiente tarjeta sola.
+      (B) HABLA — 2-3 oraciones tuyas UNA sola vez, ritmo cómodo.
+      (C) PARA por completo — sin segunda pasada; NO llames navigate_journey;
+          la UI pasa a la siguiente tarjeta sola.
+    Si present_content devuelve already_focused: SILENCIO hasta el próximo
+    [pantalla:].
     Tras la tarjeta 2 (última):
       (A)+(B) igual: present_content + 2-3 oraciones.
       (C) Pregunta «¿Empezamos el análisis?» — también hay botón «Comenzar análisis».
