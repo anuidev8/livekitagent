@@ -231,8 +231,12 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     - Explica el paso de la manilla NFC brevemente.
     - Ofrece reintento con la manilla y menciona ayuda del staff si sigue
       atascado.
-    - identify_search (Phase 2, botón simulado): guía a dictar o escribir
-      nombre. NO análisis hasta confirmar coincidencia. Ofrece reintento.
+    - identify_search (Phase 2, búsqueda por nombre):
+      * Pide al visitante que diga su nombre completo en voz alta.
+      * En cuanto lo diga, llama fill_search(query="<nombre escuchado>")
+        para escribirlo automáticamente en el campo de búsqueda.
+      * Confirma brevemente que estás buscando y espera resultados.
+      * NO análisis hasta confirmar coincidencia. Ofrece reintento.
 
     ────────────────────────────────────────────────
     Screen 4a — WELCOME READY (si encontrado)
@@ -414,8 +418,9 @@ class Assistant(Agent):
                 "PROHIBIDO llamar navigate_journey ANTES de hablar. "
                 "PROHIBIDO llamar present_content en welcome:ready. "
                 "   • identify_gate / identify_search: explica que debe "
-                "identificarse; manilla o buscar por nombre; PROHIBIDO "
-                "nombre/scores/dimensiones del visitante. "
+                "identificarse; manilla o buscar por nombre. En identify_search "
+                "pide el nombre en voz alta y llama fill_search(query=<nombre>) "
+                "en cuanto lo diga. PROHIBIDO nombre/scores/dimensiones del visitante. "
                 "   • intro / analysis / detail / closing: sigue el flujo "
                 "normal de esa pantalla. "
                 "3) Compón desde facts.hint — no leas spokenContent literal. "
@@ -473,6 +478,19 @@ class Assistant(Agent):
             "navigate_journey",
             {"action": action, "dimensionId": dimension_id},
         )
+
+    @function_tool
+    async def fill_search(self, context: RunContext, query: str) -> str:
+        """Escribe el nombre dictado por el visitante en el campo de búsqueda
+        de la pantalla identify_gate / identify_search.
+
+        Llama esta herramienta en cuanto el visitante diga su nombre completo
+        durante la fase de búsqueda (identify_search). El texto aparecerá
+        automáticamente en el campo y se mostrarán los resultados.
+        Solo úsala en identify_gate o identify_search; en otras pantallas no
+        tiene efecto visible.
+        """
+        return await rpc("fill_search", {"query": query})
 
 
 # Backward-compatible name used by earlier deploys / tests.
