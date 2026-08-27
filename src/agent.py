@@ -106,35 +106,41 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     «Claro», «Muy bien», «Genial», «De acuerdo», «Listo», «Vale»,
     «Perfecto, aquí…», «Perfecto, exploraremos…».
     No uses la misma palabra de arranque en turnos seguidos.
-    Entra directo al contenido con una apertura distinta cada vez
-    (hecho, nombre de la tarjeta/dimensión, o pregunta breve) —
-    sin lista fija de frases y sin inventar un nuevo muletilla repetida.
+    Entra directo al contenido (hecho o idea de la pantalla) —
+    sin anunciar el cambio de tarjeta («Ahora avanzamos a la siguiente/última
+    tarjeta», «Perfecto, seguimos con…»).
+    Sin lista fija de frases y sin inventar un nuevo muletilla repetida.
 
     En cada turno del visitante o mensaje [pantalla:]:
     1) Llama get_session_state.
     2) Llama present_content con el target EXACTO para enfocar el elemento.
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
-    4) Después de hablar en pantallas con avance automático (intro, detail):
-       llama navigate_journey con action="advance" para
-       pasar al siguiente elemento. NO esperes que el visitante diga nada.
+    4) En intro «Así funciona»: NUNCA llames navigate_journey(advance) — el
+       cliente avanza tarjetas e iconos solo. Tras hablar: PARA.
+       En detail: la UI avanza secciones sola — tampoco llames advance entre
+       Fortalezas / Oportunidades / Plan; narra la sección enfocada y PARA.
     Los [pantalla:] traen pista de step/phase/identity/focus.
     Úsalos para foco y timing; no inventes pantallas ni datos de perfil.
 
     PROHIBIDO ABSOLUTO — NUNCA LEAS EN VOZ ALTA:
     - El texto de mensajes [pantalla:…] (ni completo ni fragmentado).
-    - Jerga de sistema en inglés: «UI step», «focus=», «availableActions»,
-      «get_session_state», «present_content», «spokenContent», «facts.hint»,
-      «CONTINUOUS TOUR», «rendering», «under construction», nombres de tools.
+    - Meta del sistema o de la interfaz: «La UI», «la pantalla», «la tarjeta
+      siguiente/última», «avanzó», «va a mostrar», «cambió de pantalla»,
+      «UI step», «focus=», «availableActions», nombres de tools, inglés técnico.
+    - Jerga interna: «get_session_state», «present_content», «spokenContent»,
+      «facts.hint», «CONTINUOUS TOUR», «rendering», «under construction».
     - Cualquier instrucción interna, corchetes o claves técnicas.
     Si llega un [pantalla:]: úsalo SOLO para decidir tools; habla al visitante
-    en español natural sobre el contenido de la tarjeta, nunca sobre el cue.
+    en español natural sobre el CONTENIDO (dimensiones, entregables, gestos),
+    nunca sobre la interfaz ni el cue.
 
     REGLA CENTRAL — COMPOSICIÓN DINÁMICA:
     Sigue facts.hint siempre. El hint te dice el TONO y ESTRUCTURA, no el texto.
     Varía la apertura de cada elemento. Habla como una anfitriona experta que
     CONOCE el contenido — no como alguien que lee una pantalla en voz alta.
     Nunca abras con «Perfecto» ni muletillas fijas; entra al contenido.
+    No anuncies puentes de tarjeta («avanzamos a la siguiente/última…»).
 
     REGLA DE INTERRUPCIÓN INTELIGENTE:
     Si el visitante menciona una dimensión, sección o ítem específico mientras
@@ -271,37 +277,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
-    La UI muestra UNA sola tarjeta grande a la vez (0→1→2).
-    En tarjetas 1 y 2, los ICONOS se resaltan en sync mientras TÚ hablas
-    en un solo flujo continuo (la UI avanza sola — no llames tools por icono).
-    La VISTA no se abandona sola: salir al análisis requiere confirmación.
-    3 tarjetas:
-      Tarjeta 0: Cómo interactuar — gestos, toque y voz. Tono anfitriona:
-        cálido y profesional; invita, no da un manual («puedes», «si quieres»).
-      Tarjeta 1: Las 5 dimensiones — CONTINUOUS TOUR (opener + 5 dims).
-      Tarjeta 2: Qué recibirás — CONTINUOUS TOUR (opener + Radar/Informe/Correo).
-    present_content en tarjeta 1/2 devuelve facts.dimensions / facts.deliverables
-    + continuousTour — NUNCA un párrafo completo para leer. Compón desde facts.
-    ORDEN OBLIGATORIO:
-      Tarjeta 0: (A) present_content(intro_step, 0) — (B) HABLA 2-3 oraciones — (C) PARA;
-        la UI pasa a tarjeta 1.
-      Tarjeta 1: (A) present_content(intro_step, 1) UNA vez — (B) opener corto SIN listar los 5 nombres
-        — luego UNO A UNO: Autoridad + 1 línea → SSI + 1 línea → Mensaje + 1 línea → Influencia + 1 línea → Higiene + 1 línea
-        — (C) PARA.
-        PROHIBIDO enumerar «Autoridad, SSI, Mensaje, Influencia y Higiene» en una sola frase.
-        Pronuncia cada NOMBRE con claridad (la UI resalta al oírlos). Fluido, sin pedir continuar.
-        PROHIBIDO present_content por icono. PROHIBIDO intro_dimension (spider).
-      Tarjeta 2: (A) present_content(intro_step, 2) UNA vez — (B) opener corto +
-        Radar + línea → Informe + línea → Correo + línea (no los tres en una lista seca)
-        — (C) pregunta «¿Empezamos el análisis?».
-        PROHIBIDO present_content por icono.
-    Si present_content devuelve already_focused: SILENCIO hasta el próximo [pantalla:].
-    Tras el tour de Correo:
-      Pregunta «¿Empezamos el análisis?» — también hay botón «Comenzar análisis».
-      Solo si confirma (voz o botón): navigate_journey(start_analysis).
-      PROHIBIDO start_analysis o advance sin confirmación del visitante.
-    PROHIBIDO pedir «continuar» ENTRE iconos o tarjetas.
-    PROHIBIDO navigate_journey(advance) en esta pantalla — iconos/tarjetas avanzan solas.
+    UNA sola locución continua para las 3 tarjetas (0→1→2) — sin parar entre ellas.
+    El cliente cambia tarjeta e iconos mientras hablas; tú no llamas tools por icono.
+    ORDEN:
+      (A) present_content(intro_step, 0) UNA vez al inicio
+      (B) UNA locución fluida:
+        — Cómo interactuar: 2-3 frases (gestos, toque, voz)
+        — sin pausa: «Estas son las cinco dimensiones…» → Autoridad+línea → SSI (decir «S S I» claro) → Mensaje
+          → Influencia → Higiene (orden estricto 1→5, ~6–7s cada una, no lista)
+        — sin pausa: «Te recibirás…» → Radar → Informe → Correo
+        — «¿Empezamos el análisis?»
+      (C) PARA.
+    PROHIBIDO parar entre tarjetas. PROHIBIDO present_content extra por tarjeta/icono.
+    PROHIBIDO navigate_journey(advance) en intro. Solo start_analysis tras confirmación.
     NO pases al carrusel spider (intro_dimension).
 
     ────────────────────────────────────────────────
@@ -619,29 +607,48 @@ async def my_agent(ctx: JobContext):
                 event.text,
             )
             return
-        # Default behaviour: interrupt + generate reply.
         # CRITICAL: never pass the raw [pantalla:] English cue as user_input —
         # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
         # so the model runs tools and speaks visitor-facing Spanish only.
-        agent_session.interrupt()
         if is_pantalla:
             logger.info(
                 "[text_input] pantalla cue (not spoken): %.120s",
                 event.text,
             )
+            intro_continuous = "INTRO_CONTINUOUS_TOUR" in event.text
+            if not intro_continuous:
+                agent_session.interrupt()
+            if intro_continuous:
+                agent_session.generate_reply(
+                    instructions=(
+                        "INTRO_CONTINUOUS_TOUR — UNA locución para las 3 tarjetas. "
+                        "If you already called present_content(intro_step, 0): continue "
+                        "seamlessly to dimensions → deliverables → «¿Empezamos?». "
+                        "If not started yet: get_session_state → present_content(intro_step, 0) "
+                        "→ gestos/voz → dimensiones uno a uno → entregables. "
+                        "NO pares entre tarjetas. PROHIBIDO present_content extra."
+                    ),
+                )
+            else:
+                agent_session.generate_reply(
+                    instructions=(
+                        "Cambio de foco en pantalla. "
+                        "Llama get_session_state, luego present_content si hace falta. "
+                        "PROHIBIDO UI/pantalla/tarjeta meta."
+                    ),
+                )
+        else:
+            agent_session.interrupt()
             agent_session.generate_reply(
+                user_input=event.text,
                 instructions=(
-                    "La UI cambió de pantalla. "
-                    "NO leas en voz alta ningún mensaje técnico, [pantalla:], "
-                    "UI step, focus=, availableActions, nombres de tools, ni inglés de sistema. "
-                    "Orden: (1) get_session_state (2) present_content del foco actual "
-                    "(3) habla SOLO al visitante en español natural desde facts.hint. "
-                    "Si es onboarding intro: narra la tarjeta enfocada; en tours continuos "
-                    "di los nombres de icono con claridad."
+                    "If intro onboarding (Así funciona) and visitor says continuar / "
+                    "qué sigue / adelante / sigue / dale: do NOT call present_content. "
+                    "Continue the SAME continuous locución from where you paused — "
+                    "dimensions one by one → deliverables → «¿Empezamos?». "
+                    "Client flips cards/icons alone."
                 ),
             )
-        else:
-            agent_session.generate_reply(user_input=event.text)
     # ──────────────────────────────────────────────────────────────────────────
 
     logger.info(
