@@ -304,21 +304,28 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        mismos puntos (rol, standingBlurb/banda, dimensión más fuerte), pero
        MÁS AMABLE y conversacional — PROHIBIDO leer uiStandingLine literal.
        PROHIBIDO recitar solo «LÍDER · TOP 8%». Invita a abrir el detalle
-       de una dimensión (no hay vista resumen aparte). Mantén la lógica
-       de journey existente (CTA / navigate).
-       Llama navigate_journey(advance) — PROHIBIDO esperar.
+       de una dimensión (no hay vista resumen aparte).
+       availableActions aquí: reveal_results, open_detail, back, cancel —
+       PROHIBIDO navigate_journey(advance).
+       Si el visitante pide ver el detalle de una dimensión (o «detalle»,
+       «fortalezas», «oportunidades», «plan»): navigate_journey(open_detail,
+       dimension_id=serp|ssi|arquitectura|influencia|higiene) O
+       present_content(detail_dimension, dimension_id=…).
+       PROHIBIDO present_content(result_dimension) en complete — solo resalta
+       y requiere phase=results; no abre el detalle.
     3) Cuando llega [pantalla:analysis:results dim 0]: mismo globo con
        tarjeta activa resaltada. Ciclo de dimensiones ahí.
 
-    RESULTADOS (result_dimension) — sobre el globo:
+    RESULTADOS (result_dimension) — sobre el globo (solo phase=results):
     Ciclo completo para CADA dimensión:
       present_content(result_dimension, index=N) → narra: contexto primero,
       score al final de forma casual. Varía la apertura cada vez → luego
       navigate_journey(advance) para ir a la siguiente dimensión.
     PROHIBIDO pedir «continuar» ni esperar al visitante entre dimensiones.
-    Si el visitante pregunta por una dimensión concreta: present_content(result_dimension,
-    dimensionId=X), narra en detalle, pregunta si quiere ver el detalle
-    (fortalezas / oportunidades / plan de acción).
+    Si el visitante pregunta por una dimensión concreta en results: puedes
+    present_content(result_dimension, dimension_id=X) para narrar, luego
+    navigate_journey(open_detail, dimension_id=X) si quiere fortalezas /
+    oportunidades / plan de acción.
     Tras la última dimensión: advance automáticamente → detalle.
 
     DETALLE (detail_section) — MISMO GLOBO, AVANCE AUTOMÁTICO:
@@ -481,8 +488,9 @@ class Assistant(Agent):
         2=tercero), intro_card_dimension (tarjeta Las 5 dimensiones;
         mejor dimension_id=serp|ssi|arquitectura|influencia|higiene),
         intro_deliverable (Qué recibirás; index 0=Radar,1=Informe,2=Correo
-        o dimension_id=radar|informe|correo), intro_dimension (spider legacy),
-        result_dimension, detail_dimension (+dimension_id), detail_section
+        o dimension_id=radar|informe|correo),         intro_dimension (spider legacy), result_dimension (solo analysis:results),
+        detail_dimension (+dimension_id; usar en complete si piden «detalle»),
+        detail_section
         (+section), recommendation_item. Compón tu mensaje desde facts.hint
         y los campos de facts devueltos. Si ok=false, get_session_state y reintenta.
         Nunca uses target=attract|intro|analysis.
@@ -501,7 +509,9 @@ class Assistant(Agent):
     async def navigate_journey(
         self, context: RunContext, action: str, dimension_id: str = ""
     ) -> str:
-        """Ejecuta una acción disponible en la experiencia."""
+        """Ejecuta una acción disponible en la experiencia. En analysis:complete
+        usa open_detail (+ dimension_id) para abrir detalle de dimensión; advance
+        no está disponible ahí."""
         return await rpc(
             "navigate_journey",
             {"action": action, "dimensionId": dimension_id},
