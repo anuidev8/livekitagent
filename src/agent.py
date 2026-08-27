@@ -8,6 +8,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import textwrap
 from datetime import datetime
 from pathlib import Path
@@ -20,19 +21,22 @@ from livekit.agents import (
     JobContext,
     RunContext,
     ToolError,
+    TurnHandlingOptions,
     cli,
     function_tool,
+    inference,
     room_io,
 )
-from livekit.plugins import ai_coustics
+from livekit.plugins import ai_coustics, cartesia
 
 from nova_session_continuation import install_nova_session_continuation_fix
-from rpc_client import rpc
+from rpc_client import rpc, wait_for_kiosk_participant
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
 # doing this after importing ``livekit.plugins.aws`` silently has no effect.
-load_dotenv(".env.local")
+load_dotenv(".env")
+load_dotenv(".env.local", override=True)
 
 # ── File logging ──────────────────────────────────────────────────────────────
 # Writes logs to logs/<YYYY-MM-DD_HH-MM-SS>.log next to this file.
@@ -76,6 +80,23 @@ AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "huella-guide")
 NOVA_VOICE = os.getenv("NOVA_VOICE", "lupe")
 NOVA_TURN_DETECTION = os.getenv("NOVA_TURN_DETECTION", "MEDIUM")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+# Voice backend: nova (default) | cartesia (STT/LLM Inference + Cartesia Sonic TTS)
+VOICE_BACKEND = os.getenv("VOICE_BACKEND", "nova").strip().lower()
+
+# Cartesia plugin — custom voice via CARTESIA_VOICE UUID (see huella-guide-cartesia)
+STT_MODEL = os.getenv("STT_MODEL", "deepgram/nova-3")
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "multi")
+LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-31b-it")
+TTS_MODEL = os.getenv("TTS_MODEL", "sonic-3")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
+CARTESIA_VOICE = os.getenv("CARTESIA_VOICE", "").strip()
+TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "es")
+TTS_SPEED = os.getenv("TTS_SPEED", "1.0")
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # Product detail lives in Next.js RPC spokenContent / facts.
 # Keep this prompt free of investigation / surveillance framing so Bedrock
@@ -416,6 +437,11 @@ class Assistant(Agent):
         # Voice connects mid-journey (camera detect → identifying). Read the
         # live UI step first — never assume attract.
         #
+        # Cartesia STT/LLM/TTS is slower than Nova realtime; the browser often
+        # joins a few seconds after the agent. RPC without a participant forces
+        # soft-fail state and breaks the voice-driven UI sync.
+        await wait_for_kiosk_participant()
+
         # Do NOT pass tools= here. All four @function_tool methods on this
         # class are injected into the initial Bedrock session schema by the
         # SDK automatically. Passing tools= overrides that injection and
@@ -531,8 +557,74 @@ class Assistant(Agent):
         return await rpc("fill_search", {"query": query})
 
 
-# Backward-compatible name used by earlier deploys / tests.
+# Backward-compatible names used by earlier deploys / tests.
 NovaAssistant = Assistant
+CartesiaAssistant = Assistant
+
+_SPEED_PRESETS = {"slow": 0.8, "normal": 1.0, "fast": 1.2}
+
+
+def _plugin_speed() -> float:
+    key = TTS_SPEED.strip().lower()
+    if key in _SPEED_PRESETS:
+        return _SPEED_PRESETS[key]
+    try:
+        return float(TTS_SPEED)
+    except ValueError:
+        return 1.0
+
+
+def _build_tts() -> cartesia.TTS:
+    """Custom Cartesia voices require the plugin + API key."""
+    if not CARTESIA_API_KEY:
+        raise RuntimeError(
+            "CARTESIA_API_KEY is required for custom voices (e.g. angel). "
+            "Create one at https://play.cartesia.ai/keys and add it as a "
+            "LiveKit agent secret."
+        )
+    if not CARTESIA_VOICE:
+        raise RuntimeError(
+            "CARTESIA_VOICE must be your custom voice UUID from Cartesia "
+            "(Voice Library → angel → copy ID)."
+        )
+    if not _UUID_RE.match(CARTESIA_VOICE):
+        raise RuntimeError(
+            f"CARTESIA_VOICE must be a UUID, not a name like {CARTESIA_VOICE!r}. "
+            "In Cartesia: Voice Library → angel → ⋯ → Copy ID."
+        )
+    model = TTS_MODEL.removeprefix("cartesia/").strip() or "sonic-3"
+    logger.info(
+        "Cartesia TTS model=%s voice=%s… lang=%s key_set=%s",
+        model,
+        CARTESIA_VOICE[:8],
+        TTS_LANGUAGE,
+        bool(CARTESIA_API_KEY),
+    )
+    return cartesia.TTS(
+        model=model,
+        voice=CARTESIA_VOICE,
+        language=TTS_LANGUAGE,
+        speed=_plugin_speed(),
+        word_timestamps=False,
+    )
+
+
+def _build_cartesia_session() -> AgentSession:
+    """STT/LLM via Inference; TTS via Cartesia plugin (custom voice)."""
+    return AgentSession(
+        stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
+        llm=inference.LLM(model=LLM_MODEL),
+        tts=_build_tts(),
+        turn_handling=TurnHandlingOptions(
+            turn_detection=inference.TurnDetector(),
+            # Cartesia pipeline is slower than Nova; wait longer before committing
+            # partial STT ("¿Cómo" alone) and start TTS earlier once a turn ends.
+            endpointing={"min_delay": 0.9, "max_delay": 4.5},
+            interruption={"min_words": 2, "min_duration": 0.65},
+            preemptive_generation={"preemptive_tts": True},
+        ),
+        max_tool_steps=8,
+    )
 
 
 def _build_nova_realtime() -> aws.realtime.RealtimeModel:
@@ -570,28 +662,42 @@ server = AgentServer(
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def my_agent(ctx: JobContext):
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-        "agent": AGENT_NAME,
-        "voice_backend": "nova",
-        "voice_model": "amazon.nova-2-sonic",
-        "nova_voice": NOVA_VOICE,
-        "nova_session_refresh_seconds": NOVA_SESSION_REFRESH_SECONDS,
-    }
+    use_cartesia = VOICE_BACKEND == "cartesia"
 
-    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
-        logger.warning(
-            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY missing — "
-            "Nova Sonic Bedrock calls will fail until secrets are set."
+    if use_cartesia:
+        ctx.log_context_fields = {
+            "room": ctx.room.name,
+            "agent": AGENT_NAME,
+            "voice_backend": "cartesia-plugin",
+            "tts_model": TTS_MODEL,
+            "cartesia_voice": CARTESIA_VOICE,
+            "stt_model": STT_MODEL,
+            "llm_model": LLM_MODEL,
+        }
+        session = _build_cartesia_session()
+    else:
+        ctx.log_context_fields = {
+            "room": ctx.room.name,
+            "agent": AGENT_NAME,
+            "voice_backend": "nova",
+            "voice_model": "amazon.nova-2-sonic",
+            "nova_voice": NOVA_VOICE,
+            "nova_session_refresh_seconds": NOVA_SESSION_REFRESH_SECONDS,
+        }
+
+        if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
+            logger.warning(
+                "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY missing — "
+                "Nova Sonic Bedrock calls will fail until secrets are set."
+            )
+
+        session = AgentSession(
+            llm=_build_nova_realtime(),
+            # Increased from 4: get_session_state + present_content + navigate_journey
+            # + potential retry each = 6 steps needed on complex screens (detail_dimension).
+            # With 4 the agent silently stops mid-chain on those screens, appearing frozen.
+            max_tool_steps=8,
         )
-
-    session = AgentSession(
-        llm=_build_nova_realtime(),
-        # Increased from 4: get_session_state + present_content + navigate_journey
-        # + potential retry each = 6 steps needed on complex screens (detail_dimension).
-        # With 4 the agent silently stops mid-chain on those screens, appearing frozen.
-        max_tool_steps=8,
-    )
 
     # ── on_enter race guard ────────────────────────────────────────────────────
     # When the agent joins, on_enter() fires a generate_reply() that calls
@@ -606,16 +712,25 @@ async def my_agent(ctx: JobContext):
     # that event are suppressed — on_enter already covers the initial screen.
     # Subsequent cues (real screen changes) are processed normally.
     _on_enter_done = asyncio.Event()
+    # Cartesia on_enter + TTS can take 15s+; queue [pantalla:] cues instead of dropping.
+    _pantalla_queue: list[str] = []
 
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
     ) -> None:
         is_pantalla = event.text.startswith("[pantalla:")
         if is_pantalla and not _on_enter_done.is_set():
-            logger.info(
-                "[text_input] Suppressing pantalla cue (on_enter still active): %.80s",
-                event.text,
-            )
+            if use_cartesia:
+                _pantalla_queue.append(event.text)
+                logger.info(
+                    "[text_input] Queued pantalla cue (on_enter active): %.80s",
+                    event.text,
+                )
+            else:
+                logger.info(
+                    "[text_input] Suppressing pantalla cue (on_enter still active): %.80s",
+                    event.text,
+                )
             return
         # CRITICAL: never pass the raw [pantalla:] English cue as user_input —
         # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
@@ -659,14 +774,34 @@ async def my_agent(ctx: JobContext):
                     "Client flips cards/icons alone."
                 ),
             )
+
     # ──────────────────────────────────────────────────────────────────────────
 
-    logger.info(
-        "Starting Nova Sonic voice=%s region=%s refresh=%ss",
-        NOVA_VOICE,
-        AWS_REGION,
-        NOVA_SESSION_REFRESH_SECONDS,
-    )
+    if use_cartesia:
+
+        @session.on("error")
+        def _on_session_error(ev) -> None:
+            err = getattr(ev, "error", ev)
+            logger.error(
+                "session_error type=%s error=%s",
+                type(err).__name__,
+                err,
+                exc_info=isinstance(err, BaseException),
+            )
+
+        logger.info(
+            "Starting Cartesia plugin tts=%s voice=%s… lang=%s",
+            TTS_MODEL,
+            CARTESIA_VOICE[:8] if CARTESIA_VOICE else "",
+            TTS_LANGUAGE,
+        )
+    else:
+        logger.info(
+            "Starting Nova Sonic voice=%s region=%s refresh=%ss",
+            NOVA_VOICE,
+            AWS_REGION,
+            NOVA_SESSION_REFRESH_SECONDS,
+        )
 
     @session.on("user_input_transcribed")
     def _on_user_speech(event) -> None:
@@ -684,28 +819,56 @@ async def my_agent(ctx: JobContext):
             suffix = " [interrupted]" if interrupted else ""
             logger.info("[%s]%s %s", role.upper(), suffix, text)
 
-    await session.start(
-        agent=Assistant(on_enter_done=_on_enter_done),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            # lk.chat text input MUST remain enabled — notifyGuideScreen (client)
-            # sends [pantalla:…] cues via sendText on this topic. These are NOT
-            # participant attribute updates; they are real screen-nudge messages
-            # that the agent reads to know when to narrate or ask for confirmation.
-            # Custom handler suppresses the first duplicate cue that races with
-            # on_enter (see _pantalla_text_input_handler above).
-            text_input=room_io.TextInputOptions(
-                text_input_cb=_pantalla_text_input_handler,
-            ),
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=ai_coustics.audio_enhancement(
-                    model=ai_coustics.EnhancerModel.QUAIL_VF_L
-                ),
+    async def _replay_queued_pantalla() -> None:
+        await _on_enter_done.wait()
+        if not _pantalla_queue:
+            return
+        cues = list(_pantalla_queue)
+        _pantalla_queue.clear()
+        if len(cues) > 1:
+            logger.info(
+                "[text_input] Replaying latest of %d queued pantalla cue(s)",
+                len(cues),
+            )
+        cue = cues[-1]
+        logger.info("[text_input] Replaying queued pantalla: %.120s", cue)
+        _pantalla_text_input_handler(session, room_io.TextInputEvent(text=cue))
+
+    replay_task = asyncio.create_task(_replay_queued_pantalla())
+
+    room_opts = room_io.RoomOptions(
+        # Brief browser reconnects should not tear down a slow Cartesia session.
+        close_on_disconnect=not use_cartesia,
+        # lk.chat text input MUST remain enabled — notifyGuideScreen (client)
+        # sends [pantalla:…] cues via sendText on this topic. These are NOT
+        # participant attribute updates; they are real screen-nudge messages
+        # that the agent reads to know when to narrate or ask for confirmation.
+        # Custom handler suppresses the first duplicate cue that races with
+        # on_enter (see _pantalla_text_input_handler above).
+        text_input=room_io.TextInputOptions(
+            text_input_cb=_pantalla_text_input_handler,
+        ),
+        audio_input=room_io.AudioInputOptions(
+            noise_cancellation=ai_coustics.audio_enhancement(
+                model=ai_coustics.EnhancerModel.QUAIL_VF_L
             ),
         ),
     )
+    if use_cartesia:
+        room_opts.text_output = room_io.TextOutputOptions(
+            sync_transcription=True,
+            transcription_speed_factor=1.15,
+        )
+
+    await session.start(
+        agent=Assistant(on_enter_done=_on_enter_done),
+        room=ctx.room,
+        room_options=room_opts,
+    )
 
     await ctx.connect()
+
+    await replay_task
 
 
 if __name__ == "__main__":

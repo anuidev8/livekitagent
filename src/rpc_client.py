@@ -5,10 +5,29 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 
 from livekit.agents import ToolError, get_job_context
 
 logger = logging.getLogger("agent.rpc")
+
+PARTICIPANT_WAIT_SECONDS = float(os.getenv("PARTICIPANT_WAIT_SECONDS", "12"))
+
+
+async def wait_for_kiosk_participant(timeout: float | None = None) -> bool:
+    """Wait until the browser kiosk joins the room (needed before RPC tools)."""
+    wait_s = timeout if timeout is not None else PARTICIPANT_WAIT_SECONDS
+    room = get_job_context().room
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        participant = next(iter(room.remote_participants.values()), None)
+        if participant is not None:
+            logger.info("Kiosk participant ready: %s", participant.identity)
+            return True
+        await asyncio.sleep(0.15)
+    logger.warning("Kiosk participant not in room after %.1fs", wait_s)
+    return False
 
 
 async def rpc(

@@ -22,6 +22,7 @@ dependencies = [
     { name = "livekit-agents" },
     { name = "livekit-plugins-ai-coustics" },
     { name = "livekit-plugins-aws", extra = ["realtime"] },
+    { name = "livekit-plugins-cartesia" },
     { name = "python-dotenv" },
 ]
 
@@ -38,6 +39,7 @@ requires-dist = [
     { name = "livekit-agents", specifier = ">=1.7.0" },
     { name = "livekit-plugins-ai-coustics", specifier = "~=0.2" },
     { name = "livekit-plugins-aws", extras = ["realtime"], specifier = "==1.7.0" },
+    { name = "livekit-plugins-cartesia", specifier = ">=1.7.0" },
     { name = "python-dotenv" },
 ]
 
@@ -1089,6 +1091,18 @@ realtime = [
     { name = "aws-sdk-bedrock-runtime" },
     { name = "aws-sdk-signers" },
     { name = "boto3" },
+]
+
+[[package]]
+name = "livekit-plugins-cartesia"
+version = "1.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b2/6d/a22e830274b7be8adbd3e0d4f007077c30ed2e9c6bc60eec3975d478659b/livekit_plugins_cartesia-1.7.0.tar.gz", hash = "sha256:84215380424de8acb546b05b28f61ea2d95bddebd861010e00709fd5143ebd1a", size = 19477, upload-time = "2026-08-20T18:16:35.393Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f0/9b/176c84688c91ad32ee03938f92f4f77efc90c613ba8f418d7965d1cf6516/livekit_plugins_cartesia-1.7.0-py3-none-any.whl", hash = "sha256:60740855b05a7becbf78b637d915e0e091bf84e251d0a303d98a93352e2a3b91", size = 27022, upload-time = "2026-08-20T18:16:34.202Z" },
 ]
 
 [[package]]
