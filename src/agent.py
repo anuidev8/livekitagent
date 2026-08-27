@@ -235,8 +235,11 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       * Pide al visitante que diga su nombre completo en voz alta.
       * En cuanto lo diga, llama fill_search(query="<nombre escuchado>")
         para escribirlo automáticamente en el campo de búsqueda.
-      * Confirma brevemente que estás buscando y espera resultados.
-      * NO análisis hasta confirmar coincidencia. Ofrece reintento.
+      * La UI auto-selecciona el primer resultado (~1 s después de que aparece)
+        y avanza al Screen 4a automáticamente — NO necesitas hacer nada más.
+      * Di solo: "Buscando <nombre>…" y quédate en silencio mientras la UI
+        selecciona. Si en 3 s no avanzó, pregunta si quieren reintentar.
+      * Si no hay coincidencia: ofrece intentar con otro nombre o pedir ayuda.
 
     ────────────────────────────────────────────────
     Screen 4a — WELCOME READY (si encontrado)
@@ -419,8 +422,9 @@ class Assistant(Agent):
                 "PROHIBIDO llamar present_content en welcome:ready. "
                 "   • identify_gate / identify_search: explica que debe "
                 "identificarse; manilla o buscar por nombre. En identify_search "
-                "pide el nombre en voz alta y llama fill_search(query=<nombre>) "
-                "en cuanto lo diga. PROHIBIDO nombre/scores/dimensiones del visitante. "
+                "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
+                "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
+                "el resultado y avanza sola — NO llames navigate_journey. "
                 "   • intro / analysis / detail / closing: sigue el flujo "
                 "normal de esa pantalla. "
                 "3) Compón desde facts.hint — no leas spokenContent literal. "
