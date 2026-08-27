@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
 import logging.handlers
 import os
 import textwrap
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -121,6 +121,15 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Los [pantalla:] traen pista de step/phase/identity/focus.
     Úsalos para foco y timing; no inventes pantallas ni datos de perfil.
 
+    PROHIBIDO ABSOLUTO — NUNCA LEAS EN VOZ ALTA:
+    - El texto de mensajes [pantalla:…] (ni completo ni fragmentado).
+    - Jerga de sistema en inglés: «UI step», «focus=», «availableActions»,
+      «get_session_state», «present_content», «spokenContent», «facts.hint»,
+      «CONTINUOUS TOUR», «rendering», «under construction», nombres de tools.
+    - Cualquier instrucción interna, corchetes o claves técnicas.
+    Si llega un [pantalla:]: úsalo SOLO para decidir tools; habla al visitante
+    en español natural sobre el contenido de la tarjeta, nunca sobre el cue.
+
     REGLA CENTRAL — COMPOSICIÓN DINÁMICA:
     Sigue facts.hint siempre. El hint te dice el TONO y ESTRUCTURA, no el texto.
     Varía la apertura de cada elemento. Habla como una anfitriona experta que
@@ -148,7 +157,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     - attract_tour (solo index -1), gesture_practice,
       welcome_preparation (index 0..2),
       intro_step (index 0=Cómo interactuar, 1=Las 5 dimensiones, 2=Qué recibirás),
-      intro_dimension (dimension_id=higiene|serp|ssi|influencia|arquitectura),
+      intro_card_dimension (iconos en tarjeta 1; dimension_id=serp|ssi|arquitectura|influencia|higiene),
+      intro_deliverable (iconos en tarjeta 2; index 0=Radar,1=Informe,2=Correo),
+      intro_dimension (spider legacy — no usar en onboarding de 3 tarjetas),
       result_dimension (index 0..4 o dimensionId),
       detail_dimension (+dimensionId), detail_section (+section),
       recommendation_item.
@@ -249,9 +260,11 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     A) Saluda con nombre + rol/empresa. 2-3 oraciones: qué es Huella Digital
        y que explorarán su presencia. Invita a «cómo funciona».
     B) Llama navigate_journey(start_experience).
-    Si el visitante dice continuar / adelante / seguimos / listo EN CUALQUIER
-    MOMENTO: cierra en una frase y llama start_experience — NO fuerces el
-    monólogo completo.
+    Si el visitante dice continuar / adelante / seguimos / listo / empezamos
+    EN CUALQUIER MOMENTO: cierra en una frase y llama start_experience — NO
+    fuerces el monólogo completo.
+    Tras start_experience ok: SILENCIO TOTAL. PROHIBIDO repetir nombre/rol/
+    empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: repetir las 3 tarjetas de onboarding aquí.
 
@@ -259,34 +272,37 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
     La UI muestra UNA sola tarjeta grande a la vez (0→1→2).
-    Las TARJETAS (items) avanzan solas tras cada narración.
+    En tarjetas 1 y 2, los ICONOS se resaltan en sync mientras TÚ hablas
+    en un solo flujo continuo (la UI avanza sola — no llames tools por icono).
     La VISTA no se abandona sola: salir al análisis requiere confirmación.
     3 tarjetas:
       Tarjeta 0: Cómo interactuar — gestos, toque y voz. Tono anfitriona:
         cálido y profesional; invita, no da un manual («puedes», «si quieres»).
-        Evita tono de instrucción directa o lista de comandos.
-      Tarjeta 1: Las 5 dimensiones — nombres + una línea cada una (alto nivel)
-      Tarjeta 2: Qué recibirás — informe, radar, recomendaciones, envío por correo
-    present_content devuelve facts.points (anclas cortas) — NUNCA un párrafo
-    completo para leer. Compón 2-3 oraciones; PROHIBIDO pegar points como lista
-    o recitar el texto de la tarjeta; PROHIBIDO narrar la misma tarjeta dos veces.
-    ORDEN OBLIGATORIO para CADA tarjeta (0 y 1):
-      (A) present_content(intro_step, index=N) — una sola vez.
-      (B) HABLA — 2-3 oraciones tuyas UNA sola vez, ritmo cómodo.
-      (C) PARA por completo — sin segunda pasada; NO llames navigate_journey;
-          la UI pasa a la siguiente tarjeta sola.
-    Si present_content devuelve already_focused: SILENCIO hasta el próximo
-    [pantalla:].
-    Tras la tarjeta 2 (última):
-      (A)+(B) igual: present_content + 2-3 oraciones.
-      (C) Pregunta «¿Empezamos el análisis?» — también hay botón «Comenzar análisis».
-      (D) Solo si confirma (voz o botón): navigate_journey(start_analysis).
+      Tarjeta 1: Las 5 dimensiones — CONTINUOUS TOUR (opener + 5 dims).
+      Tarjeta 2: Qué recibirás — CONTINUOUS TOUR (opener + Radar/Informe/Correo).
+    present_content en tarjeta 1/2 devuelve facts.dimensions / facts.deliverables
+    + continuousTour — NUNCA un párrafo completo para leer. Compón desde facts.
+    ORDEN OBLIGATORIO:
+      Tarjeta 0: (A) present_content(intro_step, 0) — (B) HABLA 2-3 oraciones — (C) PARA;
+        la UI pasa a tarjeta 1.
+      Tarjeta 1: (A) present_content(intro_step, 1) UNA vez — (B) opener corto SIN listar los 5 nombres
+        — luego UNO A UNO: Autoridad + 1 línea → SSI + 1 línea → Mensaje + 1 línea → Influencia + 1 línea → Higiene + 1 línea
+        — (C) PARA.
+        PROHIBIDO enumerar «Autoridad, SSI, Mensaje, Influencia y Higiene» en una sola frase.
+        Pronuncia cada NOMBRE con claridad (la UI resalta al oírlos). Fluido, sin pedir continuar.
+        PROHIBIDO present_content por icono. PROHIBIDO intro_dimension (spider).
+      Tarjeta 2: (A) present_content(intro_step, 2) UNA vez — (B) opener corto +
+        Radar + línea → Informe + línea → Correo + línea (no los tres en una lista seca)
+        — (C) pregunta «¿Empezamos el análisis?».
+        PROHIBIDO present_content por icono.
+    Si present_content devuelve already_focused: SILENCIO hasta el próximo [pantalla:].
+    Tras el tour de Correo:
+      Pregunta «¿Empezamos el análisis?» — también hay botón «Comenzar análisis».
+      Solo si confirma (voz o botón): navigate_journey(start_analysis).
       PROHIBIDO start_analysis o advance sin confirmación del visitante.
-      PROHIBIDO: la UI NO inicia el análisis sola — tú tampoco.
-    PROHIBIDO pedir «continuar» ENTRE tarjetas 0→1→2.
-    PROHIBIDO navigate_journey(advance) en esta pantalla — las tarjetas avanzan solas.
-    Solo estas 3 tarjetas usan este ritmo; el resto del journey habla con la longitud normal.
-    NO pases al carrusel de dimensiones.
+    PROHIBIDO pedir «continuar» ENTRE iconos o tarjetas.
+    PROHIBIDO navigate_journey(advance) en esta pantalla — iconos/tarjetas avanzan solas.
+    NO pases al carrusel spider (intro_dimension).
 
     ────────────────────────────────────────────────
     ANALYSIS SCANNING → COMPLETE → RESULTS (mismo globo)
@@ -397,42 +413,59 @@ class Assistant(Agent):
     on_enter + generate_reply (Nova Sonic 2 mixed modalities).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_enter_done: asyncio.Event | None = None) -> None:
         super().__init__(instructions=NOVA_INSTRUCTIONS)
+        self._on_enter_done = on_enter_done
 
     async def on_enter(self) -> None:
         # Voice connects mid-journey (camera detect → identifying). Read the
         # live UI step first — never assume attract.
-        handle = self.session.generate_reply(
-            instructions=(
-                "Acabas de conectar con el kiosk Huella Digital. "
-                "1) Llama get_session_state primero — la UI puede estar en "
-                "cualquier pantalla, no asumas attract. "
-                "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
-                "   • attract: present_content(attract_tour, -1); invita a "
-                "acercar la manilla; PROHIBIDO navigate_journey. "
-                "   • welcome + phase preparing: UNA locución larga cálida de "
-                "identificación (credencial, validación, preparación); "
-                "PROHIBIDO herramientas extra ni checklist. "
-                "   • welcome + phase ready: PRIMERO habla — saluda con "
-                "facts.name, menciona rol + empresa, entrega el bloque intro "
-                "(~30-45 s). SOLO DESPUÉS de terminar de hablar llama "
-                "navigate_journey(start_experience). "
-                "PROHIBIDO llamar navigate_journey ANTES de hablar. "
-                "PROHIBIDO llamar present_content en welcome:ready. "
-                "   • identify_gate / identify_search: explica que debe "
-                "identificarse; manilla o buscar por nombre. En identify_search "
-                "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
-                "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
-                "el resultado y avanza sola — NO llames navigate_journey. "
-                "   • intro / analysis / detail / closing: sigue el flujo "
-                "normal de esa pantalla. "
-                "3) Compón desde facts.hint — no leas spokenContent literal. "
-                "PROHIBIDO abrir con «Hola» o diminutivos."
-            ),
-            tools=["get_session_state", "present_content", "navigate_journey"],
-        )
-        await handle
+        #
+        # Do NOT pass tools= here. All four @function_tool methods on this
+        # class are injected into the initial Bedrock session schema by the
+        # SDK automatically. Passing tools= overrides that injection and
+        # causes the AWS plugin to see fill_search as a mid-session addition,
+        # triggering a full Bedrock stream recycle (~2 s silence penalty) the
+        # first time identify_gate appears.
+        try:
+            handle = self.session.generate_reply(
+                instructions=(
+                    "Acabas de conectar con el kiosk Huella Digital. "
+                    "1) Llama get_session_state primero — la UI puede estar en "
+                    "cualquier pantalla, no asumas attract. "
+                    "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
+                    "   • attract: present_content(attract_tour, -1); invita a "
+                    "acercar la manilla; PROHIBIDO navigate_journey. "
+                    "   • welcome + phase preparing: UNA locución larga cálida de "
+                    "identificación (credencial, validación, preparación); "
+                    "PROHIBIDO herramientas extra ni checklist. "
+                    "   • welcome + phase ready: PRIMERO habla — saluda con "
+                    "facts.name, menciona rol + empresa, entrega el saludo corto "
+                    "(~10-12 s). SOLO DESPUÉS de terminar de hablar llama "
+                    "navigate_journey(start_experience). "
+                    "PROHIBIDO llamar navigate_journey ANTES de hablar. "
+                    "PROHIBIDO llamar present_content en welcome:ready. "
+                    "Tras start_experience ok: SILENCIO — no repitas nombre ni "
+                    "saludo; espera [pantalla:intro]. "
+                    "   • identify_gate / identify_search: explica que debe "
+                    "identificarse; manilla o buscar por nombre. En identify_search "
+                    "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
+                    "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
+                    "el resultado y avanza sola — NO llames navigate_journey. "
+                    "   • intro / analysis / detail / closing: sigue el flujo "
+                    "normal de esa pantalla. "
+                    "3) Compón desde facts.hint — no leas spokenContent literal. "
+                    "PROHIBIDO abrir con «Hola» o diminutivos."
+                ),
+            )
+            await handle
+        finally:
+            # Signal that on_enter has fully completed (audio delivered).
+            # The pantalla guard (_on_enter_done event) will unblock any
+            # subsequent [pantalla:] cues only after this point, preventing
+            # the welcome greeting from being repeated.
+            if self._on_enter_done is not None:
+                self._on_enter_done.set()
 
     @function_tool
     async def get_session_state(self, context: RunContext) -> str:
@@ -457,7 +490,10 @@ class Assistant(Agent):
         """Enfoca UN elemento visible. Targets EXACTOS: attract_tour
         (solo index -1 título), gesture_practice,
         welcome_preparation (0..2 prep), intro_step (0=primero, 1=segundo,
-        2=tercero), intro_dimension (mejor dimension_id=higiene|serp|…),
+        2=tercero), intro_card_dimension (tarjeta Las 5 dimensiones;
+        mejor dimension_id=serp|ssi|arquitectura|influencia|higiene),
+        intro_deliverable (Qué recibirás; index 0=Radar,1=Informe,2=Correo
+        o dimension_id=radar|informe|correo), intro_dimension (spider legacy),
         result_dimension, detail_dimension (+dimension_id), detail_section
         (+section), recommendation_item. Compón tu mensaje desde facts.hint
         y los campos de facts devueltos. Si ok=false, get_session_state y reintenta.
@@ -527,7 +563,11 @@ def _build_nova_realtime() -> aws.realtime.RealtimeModel:
     )
 
 
-server = AgentServer()
+server = AgentServer(
+    # Keep one idle Python process pre-warmed so the next guest never waits
+    # for a cold-start (~2 s). After a session ends the pool refills immediately.
+    num_idle_processes=1,
+)
 
 
 @server.rtc_session(agent_name=AGENT_NAME)
@@ -557,39 +597,51 @@ async def my_agent(ctx: JobContext):
 
     # ── on_enter race guard ────────────────────────────────────────────────────
     # When the agent joins, on_enter() fires a generate_reply() that calls
-    # get_session_state and narrates the current screen. At almost the same
-    # moment the client sends a [pantalla:] cue via sendText(topic="lk.chat").
-    # Nova Sonic treats this as a second, independent user turn and runs another
-    # tool chain in parallel, causing a duplicate get_session_state loop that
-    # prevents any audio from being produced.
+    # get_session_state and narrates the current screen. The client also sends
+    # a [pantalla:] cue shortly after the room connects. Because on_enter can
+    # take 10-15 s (get_session_state RTT + TTS audio), the pantalla cue often
+    # arrives AFTER the old time-based guard (2.5 s) expired, causing a second
+    # generate_reply that repeats the greeting.
     #
-    # Fix: suppress the first [pantalla:] message that arrives within
-    # ON_ENTER_GUARD_SECS of session start. on_enter already has full context
-    # from get_session_state, so the initial pantalla cue is redundant.
-    # Subsequent cues (screen changes) are always processed normally.
-    on_enter_guard_secs = 2.5
-    _session_start_time = time.monotonic()
-    _on_enter_handled = False
+    # Fix: use an asyncio.Event that is set only after on_enter() fully
+    # completes (await handle returns). All [pantalla:] cues received before
+    # that event are suppressed — on_enter already covers the initial screen.
+    # Subsequent cues (real screen changes) are processed normally.
+    _on_enter_done = asyncio.Event()
 
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
     ) -> None:
-        nonlocal _on_enter_handled
-        elapsed = time.monotonic() - _session_start_time
         is_pantalla = event.text.startswith("[pantalla:")
-        if is_pantalla and not _on_enter_handled and elapsed < on_enter_guard_secs:
+        if is_pantalla and not _on_enter_done.is_set():
             logger.info(
-                "[text_input] Suppressing duplicate pantalla cue (elapsed=%.2fs, "
-                "on_enter still active): %.80s",
-                elapsed,
+                "[text_input] Suppressing pantalla cue (on_enter still active): %.80s",
                 event.text,
             )
             return
-        if is_pantalla:
-            _on_enter_handled = True
-        # Default behaviour: interrupt + generate reply
+        # Default behaviour: interrupt + generate reply.
+        # CRITICAL: never pass the raw [pantalla:] English cue as user_input —
+        # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
+        # so the model runs tools and speaks visitor-facing Spanish only.
         agent_session.interrupt()
-        agent_session.generate_reply(user_input=event.text)
+        if is_pantalla:
+            logger.info(
+                "[text_input] pantalla cue (not spoken): %.120s",
+                event.text,
+            )
+            agent_session.generate_reply(
+                instructions=(
+                    "La UI cambió de pantalla. "
+                    "NO leas en voz alta ningún mensaje técnico, [pantalla:], "
+                    "UI step, focus=, availableActions, nombres de tools, ni inglés de sistema. "
+                    "Orden: (1) get_session_state (2) present_content del foco actual "
+                    "(3) habla SOLO al visitante en español natural desde facts.hint. "
+                    "Si es onboarding intro: narra la tarjeta enfocada; en tours continuos "
+                    "di los nombres de icono con claridad."
+                ),
+            )
+        else:
+            agent_session.generate_reply(user_input=event.text)
     # ──────────────────────────────────────────────────────────────────────────
 
     logger.info(
@@ -616,7 +668,7 @@ async def my_agent(ctx: JobContext):
             logger.info("[%s]%s %s", role.upper(), suffix, text)
 
     await session.start(
-        agent=Assistant(),
+        agent=Assistant(on_enter_done=_on_enter_done),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             # lk.chat text input MUST remain enabled — notifyGuideScreen (client)
