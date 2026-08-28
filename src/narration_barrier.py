@@ -15,13 +15,24 @@ class NarrationBarrier:
         self._event: asyncio.Event | None = None
         self._segment_id = ""
         self._token = 0
+        self._accept_ack = False
 
     def arm(self, segment_id: str) -> int:
         self._token += 1
         self._segment_id = segment_id
         self._event = asyncio.Event()
+        self._accept_ack = False
         logger.debug("narration barrier armed segment=%s token=%s", segment_id, self._token)
         return self._token
+
+    def open_ack(self) -> None:
+        """Allow client acks only after Nova has accepted this segment's speech."""
+        self._accept_ack = True
+        logger.debug(
+            "narration barrier open_ack segment=%s token=%s",
+            self._segment_id,
+            self._token,
+        )
 
     def ack(self, segment_id: str, token: int) -> bool:
         if token != self._token or segment_id != self._segment_id:
@@ -31,6 +42,13 @@ class NarrationBarrier:
                 token,
                 self._segment_id,
                 self._token,
+            )
+            return False
+        if not self._accept_ack:
+            logger.info(
+                "narration ack rejected (speech not started) segment=%s token=%s",
+                segment_id,
+                token,
             )
             return False
         if self._event and not self._event.is_set():
