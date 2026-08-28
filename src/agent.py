@@ -134,13 +134,16 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
 
     En cada turno del visitante o mensaje [pantalla:]:
     1) Llama get_session_state.
-    2) Llama present_content con el target EXACTO para enfocar el elemento.
+    2) Llama present_content con el target EXACTO para enfocar el elemento —
+       EXCEPCIÓN detail: en [pantalla:detail] tras la primera sección, salta al paso 3
+       (get_session_state basta; la UI ya avanzó sola).
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
     4) En intro «Así funciona»: NUNCA llames navigate_journey(advance) — el
        cliente avanza tarjetas e iconos solo. Tras hablar: PARA.
-       En detail: la UI avanza secciones sola — tampoco llames advance entre
-       Fortalezas / Oportunidades / Plan; narra la sección enfocada y PARA.
+       En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
+       entre secciones; en [pantalla:detail] narra desde get_session_state sin
+       present_content extra (salvo primera entrada o petición explícita del visitante).
     Los [pantalla:] traen pista de step/phase/identity/focus.
     Úsalos para foco y timing; no inventes pantallas ni datos de perfil.
 
@@ -316,8 +319,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     ANALYSIS SCANNING → COMPLETE → RESULTS (mismo globo)
     ────────────────────────────────────────────────
-    1) Scanning: narra con acompañamiento qué fuentes se revisan (Google,
-       LinkedIn, prensa, directorios, redes). Varía cada turno. PROHIBIDO lista.
+    1) Scanning: narra con acompañamiento qué fuentes se revisan — anclado en
+       facts.sourceGroups / facts.narrationAnchors / facts.searchFindings del
+       informe real (LinkedIn, prensa, redes, sitios corporativos por nombre).
+       Tono analista senior, creíble para C-level. PROHIBIDO inventar fuentes.
        Cuando el agente recibe [pantalla:analysis:complete]:
     2) Complete: el globo se queda; las tarjetas de fuentes se actualizan
        con el nombre de cada dimensión y su puntuación. Anuncia el standing
@@ -350,20 +355,22 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Tras la última dimensión: advance automáticamente → detalle.
 
     DETALLE (detail_section) — MISMO GLOBO, AVANCE AUTOMÁTICO:
-    La UI NO cambia a otra pantalla: mismo globo; título y puntuación global
-    ocultos; tarjeta activa completa con glow blanco; otras dimensiones
-    solo ícono; abajo Fortalezas / Oportunidades / Plan + Volver.
-    Ciclo completo por tu parte para CADA sección:
-      present_content(detail_section, dimensionId=X, section=S) → narra SOLO
-      esa sección en lenguaje de anfitriona experta (NO listes ni enumeres) →
-      navigate_journey(advance).
-    Orden: strengths → opportunities → action_plan.
-    PROHIBIDO pedir «continuar» o esperar al visitante entre secciones.
-    SÍ usa present_content(detail_section, section=X) si el visitante
-    menciona fortalezas, oportunidades o plan por nombre.
-    En action_plan (facts.isLastSection=true): después de narrar, ofrece
-      Volver al globo, otra dimensión, o avanzar al cierre.
-      Espera elección.
+    Audiencia: presidentes y directivos C-level — tono creíble, consultivo,
+    anclado en el informe real (facts.evidence / facts.gaps / facts.tactics).
+    La UI NO cambia de pantalla: avanza sola tras cada narración
+    (evidencia → brechas → tácticas).
+    Primera entrada a detalle: present_content(detail_section, section=strengths)
+    UNA vez → narra desde facts (PROHIBIDO decir «Fortalezas» como rótulo).
+    En cada [pantalla:detail] posterior: get_session_state ÚNICAMENTE —
+    PROHIBIDO present_content (la UI ya enfocó la sección).
+    PROHIBIDO navigate_journey(advance) entre secciones.
+    PROHIBIDO enumerar ítems o leer facts.items literal.
+    PROHIBIDO decir «Oportunidades» o «Plan de acción» como encabezados.
+    2–3 oraciones pausadas por sección; cita hallazgos concretos del análisis.
+    SÍ usa present_content(detail_section) si el visitante pide una sección
+    concreta por nombre.
+    En action_plan (facts.isLastSection=true): invita Volver, otra dimensión
+    o el informe — espera elección.
 
     DETALLE → VOLVER (back desde detail):
     Cuando el visitante dice "volver" o navega BACK desde detail, la UI
@@ -741,6 +748,7 @@ async def my_agent(ctx: JobContext):
                 event.text,
             )
             intro_continuous = "INTRO_CONTINUOUS_TOUR" in event.text
+            detail_auto = "step=detail" in event.text or "focus=detail" in event.text
             if not intro_continuous:
                 agent_session.interrupt()
             if intro_continuous:
@@ -752,6 +760,18 @@ async def my_agent(ctx: JobContext):
                         "If not started yet: get_session_state → present_content(intro_step, 0) "
                         "→ gestos/voz → dimensiones uno a uno → entregables. "
                         "NO pares entre tarjetas. PROHIBIDO present_content extra."
+                    ),
+                )
+            elif detail_auto:
+                agent_session.generate_reply(
+                    instructions=(
+                        "DETAIL_SECTION_AUTO — la UI ya avanzó a la sección activa. "
+                        "Llama get_session_state ÚNICAMENTE (PROHIBIDO present_content salvo "
+                        "que sea la primera entrada a detalle o el visitante pidió otra sección). "
+                        "Compón 2–3 oraciones desde facts.hint para audiencia C-level. "
+                        "PROHIBIDO decir Fortalezas/Oportunidades/Plan de acción como rótulos. "
+                        "Ancla en facts.evidence, facts.gaps o facts.tactics del informe real. "
+                        "PROHIBIDO navigate_journey(advance). Ritmo pausado, sin enumerar."
                     ),
                 )
             else:

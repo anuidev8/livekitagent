@@ -22,10 +22,18 @@ class DetailTask(HuellaPhaseTask):
 
                 You own the detail screen only.
 
+                Audience: C-level executives — credible, consultative, grounded in
+                real report data (facts.evidence / facts.gaps / facts.tactics).
+
                 Always ground speech in content.activeDimension / presentation.
-                The runtime focuses the spider and section before you speak on enter.
-                When the user switches dimension or section, call present_content
-                detail_dimension / detail_section BEFORE narrating so UI stays synced.
+                The UI auto-advances sections after each narration — do NOT call
+                navigate_journey(advance) between sections.
+
+                First entry: present_content(detail_section, section=strengths) once.
+                Later [pantalla:detail] cues: get_session_state only — no present_content.
+
+                PROHIBITED section labels: «Fortalezas», «Oportunidades», «Plan de acción».
+                Synthesize 2–3 paced sentences; never enumerate items verbatim.
 
                 CTAs — Guide advance / back / send_report from availableActions by
                 intent when they want the full plan or to leave detail.
@@ -52,22 +60,14 @@ class DetailTask(HuellaPhaseTask):
 
         await present_and_speak(
             self.session,
-            target="detail_dimension",
-            index=int(active.get("index") or 0),
-            dimension_id=dimension_id,
-            fallback_speak=str(active.get("summary") or dimension_id),
-            extra_instructions=(
-                "El spider ya enfoca esta dimensión. Resume score y contexto breve."
-            ),
-        )
-        await present_and_speak(
-            self.session,
             target="detail_section",
             index=0,
+            dimension_id=dimension_id,
             section=section,  # type: ignore[arg-type]
-            fallback_speak=section,
+            fallback_speak=active.get("summary") or dimension_id,
             extra_instructions=(
-                "Narra solo la sección enfocada (fortalezas, oportunidades o plan) "
-                "con el texto exacto del estado."
+                "Audiencia C-level. Compón desde facts.hint — evidencia concreta del "
+                "informe, tono de consultor senior. PROHIBIDO rótulos de sección. "
+                "2–3 oraciones pausadas; no enumeres."
             ),
         )
