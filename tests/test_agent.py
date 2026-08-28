@@ -10,12 +10,44 @@ from agent import (
     NOVA_SESSION_REFRESH_SECONDS,
     Assistant,
     NovaAssistant,
+    build_on_enter_instructions,
+    on_enter_should_defer,
 )
 from tasks import AnalysisTask, AttractTask
 
 
 def _judge_llm() -> llm.LLM:
     return inference.LLM(model="openai/gpt-4.1-mini")
+
+
+def test_on_enter_should_defer_welcome_and_failed_state() -> None:
+    assert on_enter_should_defer({"ok": True, "step": "welcome", "phase": "preparing"})
+    assert on_enter_should_defer({"ok": True, "step": "welcome", "phase": "ready"})
+    assert on_enter_should_defer({"ok": False, "step": "welcome", "phase": "ready"})
+    assert not on_enter_should_defer({"ok": True, "step": "intro", "phase": "steps"})
+
+
+def test_build_on_enter_instructions_are_short_and_state_aware() -> None:
+    attract = build_on_enter_instructions({"step": "attract", "phase": "ready"})
+    assert "present_content" in attract
+    assert "get_session_state" not in attract
+    assert len(attract) < 400
+
+    welcome_ready = build_on_enter_instructions(
+        {"step": "welcome", "phase": "ready", "title": "Huella Digital"}
+    )
+    # Only used when defer is false; keep it short if ever called.
+    assert len(welcome_ready) < 500
+
+    intro = build_on_enter_instructions(
+        {
+            "step": "intro",
+            "phase": "steps",
+            "facts": {"hint": "Narra la tarjeta actual."},
+        }
+    )
+    assert "intro" in intro
+    assert "Narra la tarjeta actual." in intro
 
 
 def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:

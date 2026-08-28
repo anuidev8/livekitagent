@@ -1,7 +1,8 @@
 """Present UI content over RPC before the voice narrates it.
 
-Call present_and_speak from phase tasks so the kiosk UI updates first, then
-generate a reply grounded in the returned spokenContent.
+Call present_and_speak (or run_present_steps) from phase tasks / orchestrators
+so the kiosk UI updates first, then Nova speaks, then playout completes before
+the next step.
 
 Important: do not pass per-reply tool_choice on Nova Sonic — Bedrock rejects
 inference-config updates and cancels the AgentTask.
@@ -12,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from livekit.agents import AgentSession
@@ -50,6 +53,20 @@ ATTRACT_CARD_SCRIPTS: list[dict[str, Any]] = [
         ),
     },
 ]
+
+
+@dataclass(frozen=True)
+class PresentStep:
+    """One UI focus + narration beat in a director sequence."""
+
+    target: str
+    index: int = 0
+    dimension_id: str = ""
+    section: str = ""
+    fallback_speak: str = ""
+    extra_instructions: str = ""
+    brief: bool = False
+    pace: IntroPace | None = None
 
 
 def _parse_rpc_json(raw: str) -> dict[str, Any]:
@@ -107,6 +124,22 @@ def _pace_instructions(
     ).strip()
 
 
+def _present_label(
+    *,
+    target: str,
+    index: int,
+    dimension_id: str,
+    data: dict[str, Any],
+) -> str:
+    surface = data.get("surface") or target
+    parts = [f"{surface}@{index}" if index >= 0 else surface]
+    if dimension_id:
+        parts.append(f"dim={dimension_id}")
+    if data.get("already_focused"):
+        parts.append("already_focused")
+    return " ".join(parts)
+
+
 async def rpc_present_content(
     *,
     target: str,
@@ -143,14 +176,25 @@ async def present_and_speak(
     section: str = "",
     brief: bool = False,
     pace: IntroPace | None = None,
+    wait_for_playout: bool = True,
 ) -> dict[str, Any]:
-    """Update the kiosk UI first, then narrate only that focused item."""
+    """Update the kiosk UI first, narrate, then wait for audio to finish."""
     data = await rpc_present_content(
         target=target,
         index=index,
         dimension_id=dimension_id,
         section=section,
     )
+    label = _present_label(
+        target=target,
+        index=index,
+        dimension_id=dimension_id,
+        data=data,
+    )
+    if data.get("ok") is False:
+        logger.warning("director step skipped speak (present failed): %s", label)
+        return data
+
     await asyncio.sleep(_paint_delay_ms(target) / 1000)
     spoken = (
         str(data.get("spokenContent") or data.get("narration") or "").strip()
@@ -164,9 +208,38 @@ async def present_and_speak(
         points,
         extra_instructions,
     )
+    logger.info("director speak start: %s pace=%s", label, resolved_pace)
     await generate_reply_safe(
         session,
         instructions=instructions,
         tool_choice="none",
+        wait_for_playout=wait_for_playout,
     )
+    logger.info("director speak done: %s", label)
     return data
+
+
+async def run_present_steps(
+    session: AgentSession,
+    steps: Iterable[PresentStep],
+    *,
+    wait_for_playout: bool = True,
+    should_continue: Callable[[], Awaitable[bool]] | None = None,
+) -> None:
+    """Run a scripted UI+voice sequence one step at a time (no pipelining)."""
+    for step in steps:
+        if should_continue is not None and not await should_continue():
+            logger.info("director sequence stopped early before %s", step.target)
+            return
+        await present_and_speak(
+            session,
+            target=step.target,
+            index=step.index,
+            fallback_speak=step.fallback_speak,
+            extra_instructions=step.extra_instructions,
+            dimension_id=step.dimension_id,
+            section=step.section,
+            brief=step.brief,
+            pace=step.pace,
+            wait_for_playout=wait_for_playout,
+        )

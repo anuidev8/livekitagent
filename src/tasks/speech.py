@@ -24,9 +24,15 @@ async def generate_reply_safe(
     allow_interruptions: bool | None = None,
     tool_choice: Any = None,
     tools: Any = None,
+    wait_for_playout: bool = False,
     **_ignored: Any,
 ) -> Any:
-    """Call generate_reply without unsupported Nova inference-config updates."""
+    """Call generate_reply without unsupported Nova inference-config updates.
+
+    When ``wait_for_playout`` is True, blocks until assistant audio for this
+    turn has fully finished — use for director/orchestrator steps so the next
+    present_content does not race ahead of speech.
+    """
     if tool_choice is not None or tools is not None:
         logger.debug(
             "Omitting tool_choice/tools for Nova Sonic generate_reply "
@@ -48,4 +54,14 @@ async def generate_reply_safe(
     if exc is not None:
         logger.warning("generate_reply finished with error: %s", exc)
         raise exc
+
+    if wait_for_playout:
+        await handle.wait_for_playout()
+        logger.debug("generate_reply playout complete handle=%s", getattr(handle, "id", "?"))
+
     return handle
+
+
+async def wait_for_agent_idle(session: AgentSession) -> None:
+    """Wait until the session has no in-flight agent speech or tool work."""
+    await session.wait_for_idle()

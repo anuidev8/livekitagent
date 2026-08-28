@@ -15,7 +15,7 @@ from livekit.agents import AgentSession
 
 from rpc_client import rpc
 from tasks.speech import generate_reply_safe
-from tasks.ui_sync import present_and_speak
+from tasks.ui_sync import PresentStep, run_present_steps
 
 logger = logging.getLogger("agent.intro_orchestrator")
 
@@ -102,20 +102,16 @@ async def _load_content() -> dict[str, Any]:
     return content if isinstance(content, dict) else {}
 
 
-async def _run_intro_tour(session: AgentSession, token: int) -> None:
-    logger.info("intro orchestrator start token=%s", token)
-    try:
-        content = await _load_content()
-        steps = _ordered_rows(content.get("processSteps"))
-        dimensions = _ordered_rows(content.get("dimensionConcepts"))
-        deliverables = _ordered_rows(content.get("deliverableConcepts"))
+def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
+    steps_rows = _ordered_rows(content.get("processSteps"))
+    dimensions = _ordered_rows(content.get("dimensionConcepts"))
+    deliverables = _ordered_rows(content.get("deliverableConcepts"))
 
-        # Card 0 — Cómo interactuar
-        if not await _step_ok(token):
-            return
-        step0 = steps[0] if steps else {}
-        await present_and_speak(
-            session,
+    steps: list[PresentStep] = []
+
+    step0 = steps_rows[0] if steps_rows else {}
+    steps.append(
+        PresentStep(
             target="intro_step",
             index=0,
             fallback_speak=_card_script(step0),
@@ -125,28 +121,25 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 "PROHIBIDO dimensiones, entregables o «empezamos el análisis»."
             ),
         )
+    )
 
-        # Transition → card 1 (dimensions)
-        step1 = steps[1] if len(steps) > 1 else {}
-        if not await _step_ok(token):
-            return
-        await present_and_speak(
-            session,
+    step1 = steps_rows[1] if len(steps_rows) > 1 else {}
+    steps.append(
+        PresentStep(
             target="intro_step",
             index=1,
             fallback_speak=_transition_line(step1),
             pace="transition",
             extra_instructions="Puente breve antes de los iconos de dimensiones.",
         )
+    )
 
-        for concept in dimensions:
-            if not await _step_ok(token):
-                return
-            dim_id = str(concept.get("id") or "").strip()
-            if not dim_id:
-                continue
-            await present_and_speak(
-                session,
+    for concept in dimensions:
+        dim_id = str(concept.get("id") or "").strip()
+        if not dim_id:
+            continue
+        steps.append(
+            PresentStep(
                 target="intro_card_dimension",
                 index=-1,
                 dimension_id=dim_id,
@@ -154,27 +147,24 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 pace="spotlight",
                 extra_instructions="Solo esta dimensión.",
             )
+        )
 
-        # Transition → card 2 (report)
-        step2 = steps[2] if len(steps) > 2 else {}
-        if not await _step_ok(token):
-            return
-        await present_and_speak(
-            session,
+    step2 = steps_rows[2] if len(steps_rows) > 2 else {}
+    steps.append(
+        PresentStep(
             target="intro_step",
             index=2,
             fallback_speak=_transition_line(step2),
             pace="transition",
             extra_instructions="Puente breve antes de los entregables.",
         )
+    )
 
-        for item in deliverables:
-            if not await _step_ok(token):
-                return
-            del_id = str(item.get("id") or "").strip()
-            idx = int(item.get("index", 0))
-            await present_and_speak(
-                session,
+    for item in deliverables:
+        del_id = str(item.get("id") or "").strip()
+        idx = int(item.get("index", 0))
+        steps.append(
+            PresentStep(
                 target="intro_deliverable",
                 index=idx,
                 dimension_id=del_id,
@@ -182,6 +172,27 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 pace="spotlight",
                 extra_instructions="Solo este entregable.",
             )
+        )
+
+    return steps
+
+
+async def _run_intro_tour(session: AgentSession, token: int) -> None:
+    logger.info("intro orchestrator start token=%s", token)
+    session.interrupt()
+    try:
+        if not await _step_ok(token):
+            return
+
+        content = await _load_content()
+        steps = _build_intro_steps(content)
+        logger.info("intro orchestrator %d director steps", len(steps))
+
+        await run_present_steps(
+            session,
+            steps,
+            should_continue=lambda: _step_ok(token),
+        )
 
         if not await _step_ok(token):
             return
@@ -197,6 +208,7 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 "Pregunta UNA vez, con calma: «¿Empezamos el análisis?» y PARA. "
                 "PROHIBIDO repetir gestos, dimensiones o entregables."
             ),
+            wait_for_playout=True,
         )
         logger.info("intro orchestrator complete token=%s", token)
     except asyncio.CancelledError:

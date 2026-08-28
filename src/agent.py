@@ -10,6 +10,7 @@ import logging.handlers
 import os
 import re
 import textwrap
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from livekit.plugins import ai_coustics, cartesia
 
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
-from tasks.intro_orchestrator import schedule_intro_tour
+from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -62,7 +63,7 @@ for _old in _all_logs[:-30]:
     _old.unlink(missing_ok=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
-NOVA_SESSION_REFRESH_SECONDS = int(os.getenv("NOVA_SESSION_REFRESH_SECONDS", "360"))
+NOVA_SESSION_REFRESH_SECONDS = int(os.getenv("NOVA_SESSION_REFRESH_SECONDS", "420"))
 if not 60 <= NOVA_SESSION_REFRESH_SECONDS <= 420:
     raise ValueError(
         "NOVA_SESSION_REFRESH_SECONDS must be between 60 and 420 seconds "
@@ -387,11 +388,14 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     CIERRE / FOTO / TARJETA:
     - photo: UNA locución — huella digital → paquete (informe + tarjeta + foto)
       para su correo; la foto es la imagen de la tarjeta. Invita al recuadro.
+      Cuando el visitante confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
     - generating: locución CORTA — componiendo entrega para su correo.
+      PROHIBIDO pedir tomar foto — la captura ya ocurrió.
     - delivered: revisar tarjeta; informe e imagen van juntos a su correo;
       «Enviar reporte» / retake_photo / advance.
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
-      navigate_journey finish cuando terminen. PROHIBIDO repetir análisis o entrega.
+      cuando confirmen salir (sí, finalizar, finish): navigate_journey(finish).
+      PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
     — Onboarding (tarjetas 1–3 dentro de intro): avanzan SOLAS tras tu narración.
@@ -429,6 +433,62 @@ _FALLBACK_SESSION = {
 }
 
 
+async def _load_session_state_for_enter() -> dict:
+    """Fetch kiosk UI state once for on_enter (no tool round-trip in Nova)."""
+    try:
+        raw = await rpc("get_session_state", retries=2)
+        state = json.loads(raw)
+        if isinstance(state, dict):
+            return state
+    except (ToolError, json.JSONDecodeError, TypeError) as exc:
+        logger.warning("on_enter: get_session_state failed: %s", exc)
+    return dict(_FALLBACK_SESSION)
+
+
+def on_enter_should_defer(state: dict) -> bool:
+    """True when the browser will drive the first reply via [pantalla:] cues."""
+    if not state.get("ok", True):
+        return True
+    step = state.get("step")
+    phase = state.get("phase")
+    # welcome:preparing — silent prewarm; welcome:ready — client sends cue on
+    # voice enable (avoids racing on_enter with a parallel get_session_state).
+    if step == "welcome" and phase in ("preparing", "ready"):
+        return True
+    return False
+
+
+def build_on_enter_instructions(state: dict) -> str:
+    """Short Nova prompt with pre-fetched state (no get_session_state in reply)."""
+    step = state.get("step", "attract")
+    phase = state.get("phase", "ready")
+    facts = state.get("facts") if isinstance(state.get("facts"), dict) else {}
+    hint = str(facts.get("hint", "")).strip()
+    hint_suffix = f" {hint}" if hint else ""
+
+    if step == "attract":
+        return (
+            "Pantalla attract. Llama present_content(attract_tour, -1), invita a "
+            "acercar la manilla. PROHIBIDO navigate_journey."
+        )
+    if step in ("identify_gate", "identify_search"):
+        return (
+            f"Pantalla {step}. Explica identificación (manilla o nombre). "
+            "En identify_search: al oír el nombre llama fill_search y di solo "
+            "'Buscando…'. NO llames navigate_journey."
+        )
+    if step == "intro":
+        return (
+            f"Pantalla intro ({phase}). Sigue NOVA_INSTRUCTIONS; compón desde "
+            f"facts.{hint_suffix}".strip()
+        )
+    title = state.get("title", "Huella Digital")
+    return (
+        f"Reconectaste en {step}:{phase} ({title}). Resume en una frase breve "
+        f"y continúa el flujo.{hint_suffix}"
+    ).strip()
+
+
 class Assistant(Agent):
     """Nova Sonic host: fixed tools, UI-first spokenContent contract.
 
@@ -450,24 +510,18 @@ class Assistant(Agent):
         # soft-fail state and breaks the voice-driven UI sync.
         await wait_for_kiosk_participant()
 
-        # welcome:preparing is a silent prewarm — client keeps mic/cues off until
-        # welcome:ready. Do not generate_reply here or Nova narrates identification
-        # while the guest still sees the loader.
-        try:
-            raw = await rpc("get_session_state", retries=2)
-            state = json.loads(raw)
-            if (
-                state.get("step") == "welcome"
-                and state.get("phase") == "preparing"
-            ):
-                logger.info(
-                    "on_enter: welcome preparing — silent prewarm, waiting for ready"
-                )
-                if self._on_enter_done is not None:
-                    self._on_enter_done.set()
-                return
-        except (ToolError, json.JSONDecodeError, TypeError) as exc:
-            logger.warning("on_enter prewarm state check failed: %s", exc)
+        state = await _load_session_state_for_enter()
+
+        if on_enter_should_defer(state):
+            logger.info(
+                "on_enter: deferring to client (step=%s phase=%s ok=%s)",
+                state.get("step"),
+                state.get("phase"),
+                state.get("ok"),
+            )
+            if self._on_enter_done is not None:
+                self._on_enter_done.set()
+            return
 
         # Do NOT pass tools= here. All four @function_tool methods on this
         # class are injected into the initial Bedrock session schema by the
@@ -475,36 +529,14 @@ class Assistant(Agent):
         # causes the AWS plugin to see fill_search as a mid-session addition,
         # triggering a full Bedrock stream recycle (~2 s silence penalty) the
         # first time identify_gate appears.
+        instructions = build_on_enter_instructions(state)
         try:
-            handle = self.session.generate_reply(
-                instructions=(
-                    "Acabas de conectar con el kiosk Huella Digital. "
-                    "1) Llama get_session_state primero — la UI puede estar en "
-                    "cualquier pantalla, no asumas attract. "
-                    "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
-                    "   • attract: present_content(attract_tour, -1); invita a "
-                    "acercar la manilla; PROHIBIDO navigate_journey. "
-                    "   • welcome + phase preparing: SILENCIO TOTAL — el cliente "
-                    "pre-calienta; espera [pantalla:welcome:ready]. "
-                    "   • welcome + phase ready: PRIMERO habla — saluda con "
-                    "facts.name, menciona rol + empresa, entrega el saludo corto "
-                    "(~10-12 s). SOLO DESPUÉS de terminar de hablar llama "
-                    "navigate_journey(start_experience). "
-                    "PROHIBIDO llamar navigate_journey ANTES de hablar. "
-                    "PROHIBIDO llamar present_content en welcome:ready. "
-                    "Tras start_experience ok: SILENCIO — no repitas nombre ni "
-                    "saludo; espera [pantalla:intro]. "
-                    "   • identify_gate / identify_search: explica que debe "
-                    "identificarse; manilla o buscar por nombre. En identify_search "
-                    "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
-                    "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
-                    "el resultado y avanza sola — NO llames navigate_journey. "
-                    "   • intro / analysis / detail / closing: sigue el flujo "
-                    "normal de esa pantalla. "
-                    "3) Compón desde facts.hint — no leas spokenContent literal. "
-                    "PROHIBIDO abrir con «Hola» o diminutivos."
-                ),
+            logger.info(
+                "on_enter: generate_reply step=%s phase=%s",
+                state.get("step"),
+                state.get("phase"),
             )
+            handle = self.session.generate_reply(instructions=instructions)
             await handle
         finally:
             # Signal that on_enter has fully completed (audio delivered).
@@ -563,7 +595,8 @@ class Assistant(Agent):
     ) -> str:
         """Ejecuta una acción disponible en la experiencia. En analysis:complete
         usa open_detail (+ dimension_id) para abrir detalle de dimensión; advance
-        no está disponible ahí."""
+        no está disponible ahí. En closing:pose|capture usa ready_for_picture cuando
+        el visitante confirma la foto. En closing:thanks usa finish cuando confirma salir."""
         return await rpc(
             "navigate_journey",
             {"action": action, "dimensionId": dimension_id},
@@ -671,12 +704,95 @@ def _build_nova_realtime() -> aws.realtime.RealtimeModel:
         turn_detection=NOVA_TURN_DETECTION,  # type: ignore[arg-type]
         region=AWS_REGION,
         tool_choice="auto",
-        generate_reply_timeout=20.0,
+        generate_reply_timeout=30.0,
         temperature=0.7,
         top_p=0.9,
         # Nova Sonic 2 defaults to mixed modalities (audio + text),
         # which enables on_enter generate_reply warm intro.
     )
+
+
+_PANTALLA_DEDUPE_SECONDS = 2.5
+_USER_VOICE_MIN_CHARS = 4
+
+# Appended to every visitor voice turn so Nova maps intent → navigate_journey.
+_USER_VOICE_TOOL_HINT = (
+    "Llama get_session_state primero. "
+    "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
+    "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
+    "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
+    "Si step=closing y phase=thanks y confirma salir "
+    "(sí, finalizar, finish, terminamos, listo para salir, yes): "
+    "di una frase breve de despedida y navigate_journey(finish). "
+    "Si step=closing y phase=delivered y pide enviar reporte: navigate_journey(advance) o send_report según availableActions."
+)
+
+
+def _pantalla_dedupe_key(text: str) -> str:
+    if "intro:run" in text or "INTRO_ORCHESTRATOR" in text:
+        return "intro:run"
+    if "closing:photo" in text:
+        return "closing:photo"
+    if "closing:generating" in text:
+        return "closing:generating"
+    if "closing:delivered" in text:
+        return "closing:delivered"
+    if "closing:thanks" in text or ("step=closing" in text and "phase=thanks" in text):
+        return "closing:thanks"
+    if "analysis:complete" in text:
+        return "analysis:complete"
+    if "detail:revisit" in text or "DETAIL_REVISIT" in text:
+        return "detail:revisit"
+    if "detail:continuous" in text or "DETAIL_CONTINUOUS" in text:
+        return "detail:continuous"
+    match = re.search(r"\[pantalla:([^\]]+)\]", text)
+    if match:
+        return match.group(1).split("]")[0].strip()
+    return text[:96]
+
+
+def _closing_pantalla_instructions(text: str) -> str | None:
+    if "closing:photo" in text or (
+        "step=closing" in text and "phase=pose" in text
+    ):
+        return (
+            "CLOSING PHOTO — get_session_state. "
+            "UNA locución: huella → paquete (informe + tarjeta + foto) para su correo; "
+            "invita al recuadro. Si confirman estar listos: navigate_journey(ready_for_picture). "
+            "PROHIBIDO repetir si ya narraste la foto en este phase."
+        )
+    if "closing:generating" in text:
+        return (
+            "CLOSING GENERATING — get_session_state. "
+            "Locución CORTA (1-2 frases): componiendo tarjeta e informe para su correo. "
+            "PROHIBIDO pedir tomar foto — la captura YA ocurrió. "
+            "PROHIBIDO repetir el mismo mensaje de entrega."
+        )
+    if "closing:delivered" in text:
+        return (
+            "CLOSING DELIVERED — get_session_state. "
+            "UNA frase: revisa la tarjeta; informe y foto van juntos a su correo. "
+            "Pregunta si envían el reporte ahora. "
+            "PROHIBIDO repetir frases ya dichas en generating o photo."
+        )
+    if "closing:thanks" in text or (
+        "step=closing" in text and "phase=thanks" in text
+    ):
+        return (
+            "CLOSING THANKS — get_session_state. "
+            "Agradecimiento cálido + invita a escanear el QR de SETI. "
+            "Si el visitante confirma salir (sí, finalizar, finish, terminamos, listo): "
+            "navigate_journey(finish) de inmediato. "
+            "Si aún no confirmó: pregunta si finalizamos → ESPERA."
+        )
+    return None
+
+
+def _telemetry_record_option() -> bool | dict[str, bool]:
+    flag = os.getenv("LIVEKIT_TELEMETRY", "on").strip().lower()
+    if flag in ("0", "false", "off", "disabled", "no"):
+        return {"traces": False, "logs": False}
+    return True
 
 
 server = AgentServer(
@@ -740,6 +856,33 @@ async def my_agent(ctx: JobContext):
     _on_enter_done = asyncio.Event()
     # Cartesia on_enter + TTS can take 15s+; queue [pantalla:] cues instead of dropping.
     _pantalla_queue: list[str] = []
+    _pantalla_guard: dict[str, object] = {
+        "last_key": "",
+        "last_at": 0.0,
+        "once_keys": set(),
+    }
+
+    def _pantalla_already_narrated(key: str) -> bool:
+        once = _pantalla_guard["once_keys"]
+        assert isinstance(once, set)
+        return key in once
+
+    def _mark_pantalla_narrated(key: str) -> None:
+        once = _pantalla_guard["once_keys"]
+        assert isinstance(once, set)
+        once.add(key)
+
+    def _should_skip_duplicate_pantalla(key: str) -> bool:
+        now = time.monotonic()
+        last_key = _pantalla_guard["last_key"]
+        last_at = _pantalla_guard["last_at"]
+        assert isinstance(last_key, str)
+        assert isinstance(last_at, float)
+        if key == last_key and (now - last_at) < _PANTALLA_DEDUPE_SECONDS:
+            return True
+        _pantalla_guard["last_key"] = key
+        _pantalla_guard["last_at"] = now
+        return False
 
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
@@ -766,6 +909,15 @@ async def my_agent(ctx: JobContext):
                 "[text_input] pantalla cue (not spoken): %.120s",
                 event.text,
             )
+            dedupe_key = _pantalla_dedupe_key(event.text)
+            if _should_skip_duplicate_pantalla(dedupe_key):
+                logger.info(
+                    "[text_input] Skipping duplicate pantalla (%.1fs): %s",
+                    _PANTALLA_DEDUPE_SECONDS,
+                    dedupe_key,
+                )
+                return
+
             intro_orchestrator_start = (
                 "INTRO_ORCHESTRATOR_START" in event.text
                 or "intro:run" in event.text
@@ -798,15 +950,17 @@ async def my_agent(ctx: JobContext):
                     and "welcome" in event.text
                 )
             )
-            if not intro_continuous and not detail_auto and not welcome_preparing:
-                agent_session.interrupt()
+            closing_instructions = _closing_pantalla_instructions(event.text)
+
             if welcome_preparing:
                 logger.info(
                     "[text_input] Ignoring preparing pantalla (silent prewarm): %.80s",
                     event.text,
                 )
                 return
+
             if intro_orchestrator_start or intro_continuous:
+                agent_session.interrupt()
                 if schedule_intro_tour(agent_session):
                     logger.info(
                         "[text_input] intro orchestrator started from pantalla"
@@ -818,7 +972,21 @@ async def my_agent(ctx: JobContext):
                         event.text,
                     )
                 return
-            elif detail_revisit:
+
+            # Python orchestrator owns intro narration — ignore other intro cues.
+            if intro_tour_running() or (
+                "step=intro" in event.text and "intro:run" not in event.text
+            ):
+                logger.info(
+                    "[text_input] Suppressed pantalla during intro orchestrator: %s",
+                    dedupe_key,
+                )
+                return
+
+            if not detail_auto and not welcome_preparing:
+                agent_session.interrupt()
+
+            if detail_revisit:
                 agent_session.generate_reply(
                     instructions=(
                         "DETAIL_REVISIT — Esta dimensión ya se narró. "
@@ -853,22 +1021,61 @@ async def my_agent(ctx: JobContext):
                         "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
                     ),
                 )
+            elif closing_instructions:
+                once_key = dedupe_key
+                if _pantalla_already_narrated(once_key):
+                    logger.info(
+                        "[text_input] Skipping repeat closing pantalla: %s", once_key
+                    )
+                    return
+                _mark_pantalla_narrated(once_key)
+                agent_session.generate_reply(instructions=closing_instructions)
+            elif dedupe_key == "analysis:complete" and _pantalla_already_narrated(
+                "analysis:complete"
+            ):
+                logger.info("[text_input] Skipping repeat analysis:complete pantalla")
+                return
             else:
+                if dedupe_key == "analysis:complete":
+                    _mark_pantalla_narrated("analysis:complete")
                 agent_session.generate_reply(
                     instructions=(
                         "Cambio de foco en pantalla. "
-                        "Llama get_session_state, luego present_content si hace falta. "
+                        "Llama get_session_state primero — ancla en step/phase actuales. "
+                        "Luego present_content solo si hace falta. "
+                        "PROHIBIDO repetir la misma locución si ya cubriste este phase. "
                         "PROHIBIDO UI/pantalla/tarjeta meta."
                     ),
                 )
         else:
+            transcript = event.text.strip()
+            if intro_tour_running():
+                if len(transcript) < _USER_VOICE_MIN_CHARS:
+                    logger.info(
+                        "[text_input] Ignoring short utterance during intro tour: %.40s",
+                        transcript,
+                    )
+                    return
+                agent_session.interrupt()
+                agent_session.generate_reply(
+                    user_input=event.text,
+                    instructions=(
+                        "INTRO TOUR ACTIVE — el orchestrator Python narra las tarjetas. "
+                        "Responde SOLO si el visitante hizo una pregunta directa (≤2 frases). "
+                        "PROHIBIDO present_content, navigate_journey(advance/start_experience) "
+                        "y PROHIBIDO re-narrar gestos, dimensiones o entregables. "
+                        f"{_USER_VOICE_TOOL_HINT}"
+                    ),
+                )
+                return
             agent_session.interrupt()
             agent_session.generate_reply(
                 user_input=event.text,
                 instructions=(
                     "If intro onboarding (Así funciona) is running: the Python orchestrator "
                     "owns cards and icons — do NOT call present_content or navigate_journey(advance). "
-                    "Answer only if the visitor asks something off-script; otherwise stay brief."
+                    "Answer only if the visitor asks something off-script; otherwise stay brief. "
+                    f"{_USER_VOICE_TOOL_HINT}"
                 ),
             )
 
@@ -934,8 +1141,8 @@ async def my_agent(ctx: JobContext):
     replay_task = asyncio.create_task(_replay_queued_pantalla())
 
     room_opts = room_io.RoomOptions(
-        # Brief browser reconnects should not tear down a slow Cartesia session.
-        close_on_disconnect=not use_cartesia,
+        # Kiosk browsers can briefly reconnect; keep the voice session alive.
+        close_on_disconnect=False,
         # lk.chat text input MUST remain enabled — notifyGuideScreen (client)
         # sends [pantalla:…] cues via sendText on this topic. These are NOT
         # participant attribute updates; they are real screen-nudge messages
@@ -962,6 +1169,7 @@ async def my_agent(ctx: JobContext):
         agent=Assistant(on_enter_done=_on_enter_done),
         room=ctx.room,
         room_options=room_opts,
+        record=_telemetry_record_option(),
     )
 
     await ctx.connect()
