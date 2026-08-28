@@ -20,7 +20,8 @@ from typing import Any, Literal
 from livekit.agents import AgentSession
 
 from rpc_client import rpc
-from tasks.speech import generate_reply_safe
+from narration_barrier import get_session_narration_barrier
+from tasks.speech import generate_reply_safe, wait_for_agent_idle
 
 logger = logging.getLogger("agent.ui_sync")
 
@@ -102,26 +103,72 @@ def _pace_instructions(
     extra: str,
 ) -> str:
     if pace == "card":
-        anchor = "; ".join(points) if points else spoken
+        anchor = spoken or "; ".join(points)
         return (
             "El foco YA está en pantalla. No uses herramientas. "
-            f"Cubre TODOS estos puntos en 4-6 frases naturales (~25 s), sin omitir ninguno: "
-            f"{anchor}. Tono cálido, no lista mecánica. Para al terminar. "
+            f"Di este guion en español, sin añadir ideas nuevas ni repetir pantallas anteriores: "
+            f"«{anchor}». Tono cálido. Para al terminar. "
             f"{extra}"
         ).strip()
     if pace == "transition":
         return (
             "El foco YA está en pantalla. No uses herramientas. "
-            f"Di una o dos frases de puente, claras y breves: «{spoken}». "
-            "Aún no entres en el detalle de los iconos. Para. "
+            f"Di EXACTAMENTE esta frase de puente, sin añadir nada antes ni después: «{spoken}». "
             f"{extra}"
         ).strip()
     return (
         "El icono YA está resaltado. No uses herramientas. "
-        f"Di una o dos frases claras sobre el concepto en pantalla: «{spoken}». "
-        "No repitas el título del icono (ya es visible). Para. "
+        f"Di EXACTAMENTE esta frase, sin añadir nada antes ni después: «{spoken}». "
         f"{extra}"
     ).strip()
+
+
+async def _arm_client_narration_ack(segment_id: str, token: int) -> None:
+    await rpc(
+        "director_narration_arm",
+        {
+            "segmentId": segment_id,
+            "token": token,
+            "timeoutMs": 120_000,
+        },
+        timeout=5.0,
+    )
+
+
+async def speak_director_line(
+    session: AgentSession,
+    *,
+    segment_id: str,
+    instructions: str,
+    wait_for_playout: bool = True,
+    wait_for_client_ack: bool = True,
+) -> bool:
+    """Interrupt, speak one director line, wait for kiosk room-audio ack."""
+    session.interrupt()
+    await wait_for_agent_idle(session)
+
+    barrier = get_session_narration_barrier()
+    token = barrier.arm(segment_id)
+    try:
+        await _arm_client_narration_ack(segment_id, token)
+    except Exception as exc:
+        logger.warning("director_narration_arm failed segment=%s: %s", segment_id, exc)
+
+    await generate_reply_safe(
+        session,
+        instructions=instructions,
+        allow_interruptions=False,
+        wait_for_playout=wait_for_playout,
+    )
+    await wait_for_agent_idle(session)
+
+    if not wait_for_client_ack:
+        return True
+
+    acked = await barrier.wait(segment_id, token, timeout=120.0)
+    if not acked:
+        logger.warning("director client ack timeout segment=%s", segment_id)
+    return acked
 
 
 def _present_label(
@@ -177,8 +224,12 @@ async def present_and_speak(
     brief: bool = False,
     pace: IntroPace | None = None,
     wait_for_playout: bool = True,
+    wait_for_client_ack: bool = True,
 ) -> dict[str, Any]:
-    """Update the kiosk UI first, narrate, then wait for audio to finish."""
+    """Update the kiosk UI first, narrate, then wait for room audio to finish."""
+    session.interrupt()
+    await wait_for_agent_idle(session)
+
     data = await rpc_present_content(
         target=target,
         index=index,
@@ -209,13 +260,14 @@ async def present_and_speak(
         extra_instructions,
     )
     logger.info("director speak start: %s pace=%s", label, resolved_pace)
-    await generate_reply_safe(
+    acked = await speak_director_line(
         session,
+        segment_id=label,
         instructions=instructions,
-        tool_choice="none",
         wait_for_playout=wait_for_playout,
+        wait_for_client_ack=wait_for_client_ack,
     )
-    logger.info("director speak done: %s", label)
+    logger.info("director speak done: %s client_ack=%s", label, acked)
     return data
 
 
@@ -224,6 +276,7 @@ async def run_present_steps(
     steps: Iterable[PresentStep],
     *,
     wait_for_playout: bool = True,
+    wait_for_client_ack: bool = True,
     should_continue: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Run a scripted UI+voice sequence one step at a time (no pipelining)."""
@@ -242,4 +295,5 @@ async def run_present_steps(
             brief=step.brief,
             pace=step.pace,
             wait_for_playout=wait_for_playout,
+            wait_for_client_ack=wait_for_client_ack,
         )

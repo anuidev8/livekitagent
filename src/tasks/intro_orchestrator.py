@@ -14,8 +14,7 @@ from typing import Any
 from livekit.agents import AgentSession
 
 from rpc_client import rpc
-from tasks.speech import generate_reply_safe
-from tasks.ui_sync import PresentStep, run_present_steps
+from tasks.ui_sync import PresentStep, run_present_steps, speak_director_line
 
 logger = logging.getLogger("agent.intro_orchestrator")
 
@@ -201,14 +200,16 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         except Exception as exc:
             logger.warning("intro_tour_finished RPC failed: %s", exc)
 
-        await generate_reply_safe(
+        await speak_director_line(
             session,
+            segment_id="intro_tour:closing_question",
             instructions=(
                 "El recorrido «Así funciona» ya terminó. "
                 "Pregunta UNA vez, con calma: «¿Empezamos el análisis?» y PARA. "
                 "PROHIBIDO repetir gestos, dimensiones o entregables."
             ),
             wait_for_playout=True,
+            wait_for_client_ack=True,
         )
         logger.info("intro orchestrator complete token=%s", token)
     except asyncio.CancelledError:

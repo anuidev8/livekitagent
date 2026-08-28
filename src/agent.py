@@ -33,6 +33,7 @@ from livekit.plugins import ai_coustics, cartesia
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
 from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
+from narration_barrier import NarrationBarrier, set_session_narration_barrier
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -1139,6 +1140,20 @@ async def my_agent(ctx: JobContext):
         _pantalla_text_input_handler(session, room_io.TextInputEvent(text=cue))
 
     replay_task = asyncio.create_task(_replay_queued_pantalla())
+
+    narration_barrier = NarrationBarrier()
+    set_session_narration_barrier(narration_barrier)
+
+    @ctx.room.local_participant.register_rpc_method("narration_segment_done")
+    async def _on_narration_segment_done(data) -> str:
+        try:
+            payload = json.loads(data.payload or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        segment_id = str(payload.get("segmentId") or "")
+        token = int(payload.get("token") or 0)
+        ok = narration_barrier.ack(segment_id, token)
+        return json.dumps({"ok": ok})
 
     room_opts = room_io.RoomOptions(
         # Kiosk browsers can briefly reconnect; keep the voice session alive.
