@@ -1057,6 +1057,17 @@ async def my_agent(ctx: JobContext):
                         transcript,
                     )
                     return
+                # Scripted intro: kiosk mic is muted during director segments.
+                # Ignore ambient STT/backchannel so we do not interrupt Nova.
+                looks_like_question = "?" in transcript or transcript.lower().startswith(
+                    ("qué", "que ", "cómo", "como ", "por qué", "porque ", "cuándo", "cuando ")
+                )
+                if not looks_like_question and len(transcript) < 24:
+                    logger.info(
+                        "[text_input] Suppressed non-question during intro tour: %.40s",
+                        transcript,
+                    )
+                    return
                 agent_session.interrupt()
                 agent_session.generate_reply(
                     user_input=event.text,

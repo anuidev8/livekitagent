@@ -142,9 +142,16 @@ async def speak_director_line(
     instructions: str,
     wait_for_playout: bool = True,
     wait_for_client_ack: bool = True,
+    interrupt_first: bool = False,
 ) -> bool:
-    """Interrupt, speak one director line, wait for kiosk room-audio ack."""
-    session.interrupt()
+    """Speak one director line, wait for kiosk room-audio ack.
+
+    Do not interrupt between orchestrator steps — that cuts the previous
+    segment while room audio is still playing. Only the orchestrator entry
+    should pass interrupt_first=True to clear welcome/navigate tail speech.
+    """
+    if interrupt_first:
+        session.interrupt()
     await wait_for_agent_idle(session)
 
     barrier = get_session_narration_barrier()
@@ -230,9 +237,6 @@ async def present_and_speak(
     wait_for_client_ack: bool = True,
 ) -> dict[str, Any]:
     """Update the kiosk UI first, narrate, then wait for room audio to finish."""
-    session.interrupt()
-    await wait_for_agent_idle(session)
-
     data = await rpc_present_content(
         target=target,
         index=index,
