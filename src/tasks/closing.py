@@ -28,9 +28,9 @@ class ClosingTask(HuellaPhaseTask):
                 delivered, thanks) in sync with what is on screen. Capture only after
                 clear confirmation: navigate_journey ready_for_picture. Count slowly.
                 Guide every CTA by intent (confirm pose, capture, finish, back when
-                available). After the picture and when everything is done, thank by
-                dynamic name and close with: La autoridad digital no se improvisa.
-                Se diseña. On thanks, navigate_journey finish when they are done.
+                available). On thanks: warm thank-you by name, invite them to scan
+                the QR to learn more about SETI, then navigate_journey finish when
+                done. Do NOT re-narrate analysis, scores, or delivery details.
 
                 If the step leaves report/closing (for example back to recommendations),
                 call return_to_supervisor.

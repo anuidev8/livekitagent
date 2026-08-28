@@ -31,6 +31,7 @@ from livekit.plugins import ai_coustics, cartesia
 
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
+from tasks.intro_orchestrator import schedule_intro_tour
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -139,8 +140,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        (get_session_state basta; la UI ya avanzó sola).
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
-    4) En intro «Así funciona»: NUNCA llames navigate_journey(advance) — el
-       cliente avanza tarjetas e iconos solo. Tras hablar: PARA.
+    4) En intro «Así funciona»: el runtime Python ejecuta el recorrido de las
+       tres tarjetas por RPC — NO llames present_content ni navigate_journey(advance)
+       durante ese tour. Tras el tour, solo pregunta «¿Empezamos el análisis?» y PARA.
        En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
        entre secciones. UNA sola locución continua evidencia→brechas→tácticas;
        PROHIBIDO silencio o pausa entre bloques o ítems. PROHIBIDO present_content
@@ -303,11 +305,16 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     UNA locución POR tarjeta — el cliente avanza la UI entre tarjetas.
     ORDEN:
       Card 0: present_content(intro_step, 0) → SOLO gestos/toque/voz → PARA.
-      Card 1: present_content(intro_step, 1) → SOLO dimensiones (una a una) → PARA.
-      Card 2: present_content(intro_step, 2) → SOLO entregables → «¿Empezamos?» → PARA.
+      Card 1: present_content(intro_step, 1) → transición breve → por CADA dimensión en
+        facts.dimensions: present_content(intro_card_dimension, dimension_id=…) ANTES del
+        nombre → narra → siguiente → PARA.
+      Card 2: present_content(intro_step, 2) → «Te recibirás…» → por CADA entregable en
+        facts.deliverables: present_content(intro_deliverable, index=…) ANTES de la etiqueta
+        → narra → «¿Empezamos?» → PARA.
     Espera [pantalla:intro:steps:N] antes de cada tarjeta.
     PROHIBIDO mezclar gestos + dimensiones + entregables en una sola locución.
-    PROHIBIDO present_content extra por icono. Solo start_analysis tras confirmación en card 2.
+    OBLIGATORIO present_content por icono — la UI resalta solo cuando llamas la tool.
+    Solo start_analysis tras confirmación en card 2.
     NO pases al carrusel spider (intro_dimension).
 
     ────────────────────────────────────────────────
@@ -364,6 +371,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PROHIBIDO present_content entre bloques. PROHIBIDO navigate_journey(advance).
     PROHIBIDO rótulos «Fortalezas/Oportunidades/Plan de acción».
     PROHIBIDO leer facts.items literalmente — prosa fluida C-level.
+    Al cerrar tácticas: UNA pregunta — informe, volver al globo u otra dimensión — PARA y ESPERA.
+    PROHIBIDO repetir el detalle de una dimensión ya narrada (facts.detailTourComplete).
+    send_report | back | open_detail(dimension_id=…) según respuesta.
 
     DETALLE → VOLVER (back desde detail):
     Cuando el visitante dice "volver" o navega BACK desde detail, la UI
@@ -375,15 +385,13 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Espera su elección.
 
     CIERRE / FOTO / TARJETA:
-    - photo (prep/pose/capture/shutter/generating): UNA sola locución
-      larga y cálida EN TOTAL al entrar. Cubre: vamos a crear tu
-      informe personalizado, y antes tomamos una foto para la tarjeta;
-      quédate en el recuadro y confirma cuando estés listo.
-      La UI cambia títulos sola — PROHIBIDO re-narrar o llamar
-      herramientas por cada fase. PROHIBIDO navigate_journey.
-    - delivered: la cámara está activa — narra el resultado con calidez
-      usando facts (nombre, topDimension, score). Espera phase=thanks.
-    - thanks: agradece brevemente, ofrece terminar.
+    - photo: UNA locución — huella digital → paquete (informe + tarjeta + foto)
+      para su correo; la foto es la imagen de la tarjeta. Invita al recuadro.
+    - generating: locución CORTA — componiendo entrega para su correo.
+    - delivered: revisar tarjeta; informe e imagen van juntos a su correo;
+      «Enviar reporte» / retake_photo / advance.
+    - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
+      navigate_journey finish cuando terminen. PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
     — Onboarding (tarjetas 1–3 dentro de intro): avanzan SOLAS tras tu narración.
@@ -758,11 +766,24 @@ async def my_agent(ctx: JobContext):
                 "[text_input] pantalla cue (not spoken): %.120s",
                 event.text,
             )
+            intro_orchestrator_start = (
+                "INTRO_ORCHESTRATOR_START" in event.text
+                or "intro:run" in event.text
+            )
             intro_continuous = (
                 "INTRO_CONTINUOUS_TOUR" in event.text
                 or "INTRO_CARD_READY" in event.text
             )
-            detail_auto = "step=detail" in event.text or "focus=detail" in event.text
+            detail_revisit = (
+                "detail:revisit" in event.text or "DETAIL_REVISIT" in event.text
+            )
+            detail_auto = (
+                "detail:continuous" in event.text
+                or "DETAIL_CONTINUOUS" in event.text
+                or detail_revisit
+                or "step=detail" in event.text
+                or "focus=detail" in event.text
+            )
             welcome_ready = (
                 "[pantalla:welcome:ready]" in event.text
                 or (
@@ -785,31 +806,26 @@ async def my_agent(ctx: JobContext):
                     event.text,
                 )
                 return
-            if intro_continuous:
-                card_idx = "0"
-                for token in event.text.replace("]", " ").replace("[", " ").split():
-                    if token.startswith("index="):
-                        card_idx = token.split("=", 1)[-1].strip()
-                        break
-                    if token.startswith("intro:steps:"):
-                        card_idx = token.rsplit(":", 1)[-1]
-                        break
+            if intro_orchestrator_start or intro_continuous:
+                if schedule_intro_tour(agent_session):
+                    logger.info(
+                        "[text_input] intro orchestrator started from pantalla"
+                    )
+                else:
+                    logger.info(
+                        "[text_input] intro orchestrator already active — "
+                        "ignored pantalla: %.80s",
+                        event.text,
+                    )
+                return
+            elif detail_revisit:
                 agent_session.generate_reply(
                     instructions=(
-                        f"INTRO_CARD_TOUR — tarjeta {card_idx} solamente. "
-                        "Si no empezaste: get_session_state → present_content(intro_step, "
-                        f"{card_idx}) UNA vez. "
-                        + (
-                            "Card 0: SOLO gestos/toque/voz (facts.points). "
-                            "PROHIBIDO dimensiones, radar, informe, correo, empezamos. PARA."
-                            if card_idx == "0"
-                            else "Card 1: SOLO «Estas son las cinco dimensiones…» → "
-                            "Autoridad → SSI → Mensaje → Influencia → Higiene (UNO A UNO, ~6s). "
-                            "PROHIBIDO gestos/entregables/lista con comas. PARA."
-                            if card_idx == "1"
-                            else "Card 2: SOLO «Te recibirás…» → Radar → Informe → Correo → "
-                            "«¿Empezamos el análisis?». PROHIBIDO gestos/dimensiones. PARA."
-                        )
+                        "DETAIL_REVISIT — Esta dimensión ya se narró. "
+                        "PROHIBIDO repetir evidencia/brechas/tácticas. "
+                        "PROHIBIDO present_content(detail_section). "
+                        "Di UNA frase breve: informe, volver al globo u otra dimensión → ESPERA. "
+                        "send_report | back | open_detail(dimension_id=…)."
                     ),
                 )
             elif detail_auto:
@@ -821,7 +837,8 @@ async def my_agent(ctx: JobContext):
                         "PROHIBIDO parar, callar o END entre bloques o ítems. "
                         "PROHIBIDO present_content extra ni get_session_state entre bloques. "
                         "PROHIBIDO rótulos Fortalezas/Oportunidades/Plan. "
-                        "UI resalta secciones sola — tú sigues hablando sin interrupción."
+                        "UI resalta secciones sola — tú sigues hablando sin interrupción. "
+                        "Al cerrar tácticas: pregunta informe / volver / otra dimensión → PARA y ESPERA."
                     ),
                 )
             elif welcome_ready:
@@ -849,10 +866,9 @@ async def my_agent(ctx: JobContext):
             agent_session.generate_reply(
                 user_input=event.text,
                 instructions=(
-                    "If intro onboarding (Así funciona) and visitor says continuar / "
-                    "qué sigue / adelante / sigue / dale: do NOT call present_content. "
-                    "Continue ONLY the current card's speech — do NOT jump to dimensions or deliverables. "
-                    "Client advances cards after each speech."
+                    "If intro onboarding (Así funciona) is running: the Python orchestrator "
+                    "owns cards and icons — do NOT call present_content or navigate_journey(advance). "
+                    "Answer only if the visitor asks something off-script; otherwise stay brief."
                 ),
             )
 
@@ -935,11 +951,12 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
-    if use_cartesia:
-        room_opts.text_output = room_io.TextOutputOptions(
-            sync_transcription=True,
-            transcription_speed_factor=1.15,
-        )
+    # Stream agent speech text to lk.transcription so the kiosk can sync icon
+    # spotlights to Nova/Cartesia audio (intro card tour).
+    room_opts.text_output = room_io.TextOutputOptions(
+        sync_transcription=True,
+        transcription_speed_factor=1.15 if use_cartesia else 1.05,
+    )
 
     await session.start(
         agent=Assistant(on_enter_done=_on_enter_done),
