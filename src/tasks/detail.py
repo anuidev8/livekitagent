@@ -25,15 +25,16 @@ class DetailTask(HuellaPhaseTask):
                 Audience: C-level executives — credible, consultative, grounded in
                 real report data (facts.evidence / facts.gaps / facts.tactics).
 
-                Always ground speech in content.activeDimension / presentation.
-                The UI auto-advances sections after each narration — do NOT call
-                navigate_journey(advance) between sections.
+                Paraphrase for facts.role and facts.company — explain WHY each
+                observation matters; never read facts.items verbatim.
 
-                First entry: present_content(detail_section, section=strengths) once.
-                Later [pantalla:detail] cues: get_session_state only — no present_content.
-
-                PROHIBITED section labels: «Fortalezas», «Oportunidades», «Plan de acción».
-                Synthesize 2–3 paced sentences; never enumerate items verbatim.
+                DETAIL_CONTINUOUS_TOUR — ONE uninterrupted locution for evidence →
+                gaps → tactics. First entry: present_content(detail_section,
+                section=strengths) once. Weave facts in flowing C-level prose —
+                NO get_session_state or present_content between blocks.
+                PROHIBITED: silence, pauses, or stopping between blocks OR items.
+                Chain with connectors; never read facts.items one-by-one.
+                UI highlights Fortalezas → Oportunidades → Plan alone — keep speaking.
 
                 CTAs — Guide advance / back / send_report from availableActions by
                 intent when they want the full plan or to leave detail.
@@ -66,8 +67,9 @@ class DetailTask(HuellaPhaseTask):
             section=section,  # type: ignore[arg-type]
             fallback_speak=active.get("summary") or dimension_id,
             extra_instructions=(
-                "Audiencia C-level. Compón desde facts.hint — evidencia concreta del "
-                "informe, tono de consultor senior. PROHIBIDO rótulos de sección. "
-                "2–3 oraciones pausadas; no enumeres."
+                "DETAIL_CONTINUOUS_TOUR — UNA locución SIN silencios: evidencia → brechas → tácticas. "
+                "Parafrasea facts para facts.role — explica POR QUÉ; PROHIBIDO pausas entre bloques/ítems. "
+                "Encadena con «Además…», «Donde veo margen…», «En concreto…». "
+                "PROHIBIDO rótulos de sección. UI resalta secciones sola — sigue hablando."
             ),
         )

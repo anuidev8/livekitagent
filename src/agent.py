@@ -142,8 +142,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     4) En intro «Así funciona»: NUNCA llames navigate_journey(advance) — el
        cliente avanza tarjetas e iconos solo. Tras hablar: PARA.
        En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
-       entre secciones; en [pantalla:detail] narra desde get_session_state sin
-       present_content extra (salvo primera entrada o petición explícita del visitante).
+       entre secciones. UNA sola locución continua evidencia→brechas→tácticas;
+       PROHIBIDO silencio o pausa entre bloques o ítems. PROHIBIDO present_content
+       extra tras la primera entrada (salvo petición explícita del visitante).
     Los [pantalla:] traen pista de step/phase/identity/focus.
     Úsalos para foco y timing; no inventes pantallas ni datos de perfil.
 
@@ -247,11 +248,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     será encontrado o no en la base de datos.
 
     Tus responsabilidades:
-    - Emite UNA sola locución larga y cálida (3-5 frases) que acompañe TODO
-      el proceso: confirmar credencial del evento, validar información,
-      preparar la experiencia personalizada.
-    - Tono de acompañamiento cálido — no lenguaje técnico de «carga».
-    PROHIBIDO llamar herramientas adicionales mientras phase=preparing.
+    - SILENCIO TOTAL mientras phase=preparing. El cliente pre-calienta la
+      sesión de voz sin locución — la primera voz es el saludo en welcome:ready.
+    PROHIBIDO hablar, narrar o llamar herramientas mientras phase=preparing.
     PROHIBIDO enumerar ítems del checklist o mencionarlos uno a uno.
     PROHIBIDO pedir continuar o confirmación.
     PROHIBIDO nombre, rol, empresa mientras preparing.
@@ -301,19 +300,14 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
-    UNA sola locución continua para las 3 tarjetas (0→1→2) — sin parar entre ellas.
-    El cliente cambia tarjeta e iconos mientras hablas; tú no llamas tools por icono.
+    UNA locución POR tarjeta — el cliente avanza la UI entre tarjetas.
     ORDEN:
-      (A) present_content(intro_step, 0) UNA vez al inicio
-      (B) UNA locución fluida:
-        — Cómo interactuar: 2-3 frases (gestos, toque, voz)
-        — sin pausa: «Estas son las cinco dimensiones…» → Autoridad+línea → SSI (decir «S S I» claro) → Mensaje
-          → Influencia → Higiene (orden estricto 1→5, ~6–7s cada una, no lista)
-        — sin pausa: «Te recibirás…» → Radar → Informe → Correo
-        — «¿Empezamos el análisis?»
-      (C) PARA.
-    PROHIBIDO parar entre tarjetas. PROHIBIDO present_content extra por tarjeta/icono.
-    PROHIBIDO navigate_journey(advance) en intro. Solo start_analysis tras confirmación.
+      Card 0: present_content(intro_step, 0) → SOLO gestos/toque/voz → PARA.
+      Card 1: present_content(intro_step, 1) → SOLO dimensiones (una a una) → PARA.
+      Card 2: present_content(intro_step, 2) → SOLO entregables → «¿Empezamos?» → PARA.
+    Espera [pantalla:intro:steps:N] antes de cada tarjeta.
+    PROHIBIDO mezclar gestos + dimensiones + entregables en una sola locución.
+    PROHIBIDO present_content extra por icono. Solo start_analysis tras confirmación en card 2.
     NO pases al carrusel spider (intro_dimension).
 
     ────────────────────────────────────────────────
@@ -329,6 +323,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        con calidez anclado en facts.uiStandingLine (el título en pantalla):
        mismos puntos (rol, standingBlurb/banda, dimensión más fuerte), pero
        MÁS AMABLE y conversacional — PROHIBIDO leer uiStandingLine literal.
+       En el mismo flujo (3–5 oraciones): UNA fortaleza concreta de
+       facts.strengths o facts.coverLines y UNA brecha de facts.opportunities
+       o facts.weakestDimension — solo datos del informe, tono consultor C-level.
        PROHIBIDO recitar solo «LÍDER · TOP 8%». Invita a abrir el detalle
        de una dimensión (no hay vista resumen aparte).
        availableActions aquí: reveal_results, open_detail, back, cancel —
@@ -357,20 +354,16 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     DETALLE (detail_section) — MISMO GLOBO, AVANCE AUTOMÁTICO:
     Audiencia: presidentes y directivos C-level — tono creíble, consultivo,
     anclado en el informe real (facts.evidence / facts.gaps / facts.tactics).
-    La UI NO cambia de pantalla: avanza sola tras cada narración
-    (evidencia → brechas → tácticas).
-    Primera entrada a detalle: present_content(detail_section, section=strengths)
-    UNA vez → narra desde facts (PROHIBIDO decir «Fortalezas» como rótulo).
-    En cada [pantalla:detail] posterior: get_session_state ÚNICAMENTE —
-    PROHIBIDO present_content (la UI ya enfocó la sección).
-    PROHIBIDO navigate_journey(advance) entre secciones.
-    PROHIBIDO enumerar ítems o leer facts.items literal.
-    PROHIBIDO decir «Oportunidades» o «Plan de acción» como encabezados.
-    2–3 oraciones pausadas por sección; cita hallazgos concretos del análisis.
-    SÍ usa present_content(detail_section) si el visitante pide una sección
-    concreta por nombre.
-    En action_plan (facts.isLastSection=true): invita Volver, otra dimensión
-    o el informe — espera elección.
+    Parafrasea para facts.role en facts.company — explica el POR QUÉ; PROHIBIDO
+    leer facts.items literalmente.
+    La UI resalta Fortalezas → Oportunidades → Plan sola mientras hablas.
+    Primera entrada: present_content(detail_section, section=strengths) UNA vez.
+    UNA locución continua SIN silencios: evidencia → brechas → tácticas encadenadas
+    con conectores («Además…», «Donde veo margen…», «En concreto…»).
+    PROHIBIDO parar, callar o pausar entre bloques o ítems.
+    PROHIBIDO present_content entre bloques. PROHIBIDO navigate_journey(advance).
+    PROHIBIDO rótulos «Fortalezas/Oportunidades/Plan de acción».
+    PROHIBIDO leer facts.items literalmente — prosa fluida C-level.
 
     DETALLE → VOLVER (back desde detail):
     Cuando el visitante dice "volver" o navega BACK desde detail, la UI
@@ -449,6 +442,25 @@ class Assistant(Agent):
         # soft-fail state and breaks the voice-driven UI sync.
         await wait_for_kiosk_participant()
 
+        # welcome:preparing is a silent prewarm — client keeps mic/cues off until
+        # welcome:ready. Do not generate_reply here or Nova narrates identification
+        # while the guest still sees the loader.
+        try:
+            raw = await rpc("get_session_state", retries=2)
+            state = json.loads(raw)
+            if (
+                state.get("step") == "welcome"
+                and state.get("phase") == "preparing"
+            ):
+                logger.info(
+                    "on_enter: welcome preparing — silent prewarm, waiting for ready"
+                )
+                if self._on_enter_done is not None:
+                    self._on_enter_done.set()
+                return
+        except (ToolError, json.JSONDecodeError, TypeError) as exc:
+            logger.warning("on_enter prewarm state check failed: %s", exc)
+
         # Do NOT pass tools= here. All four @function_tool methods on this
         # class are injected into the initial Bedrock session schema by the
         # SDK automatically. Passing tools= overrides that injection and
@@ -464,9 +476,8 @@ class Assistant(Agent):
                     "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
                     "   • attract: present_content(attract_tour, -1); invita a "
                     "acercar la manilla; PROHIBIDO navigate_journey. "
-                    "   • welcome + phase preparing: UNA locución larga cálida de "
-                    "identificación (credencial, validación, preparación); "
-                    "PROHIBIDO herramientas extra ni checklist. "
+                    "   • welcome + phase preparing: SILENCIO TOTAL — el cliente "
+                    "pre-calienta; espera [pantalla:welcome:ready]. "
                     "   • welcome + phase ready: PRIMERO habla — saluda con "
                     "facts.name, menciona rol + empresa, entrega el saludo corto "
                     "(~10-12 s). SOLO DESPUÉS de terminar de hablar llama "
@@ -747,31 +758,82 @@ async def my_agent(ctx: JobContext):
                 "[text_input] pantalla cue (not spoken): %.120s",
                 event.text,
             )
-            intro_continuous = "INTRO_CONTINUOUS_TOUR" in event.text
+            intro_continuous = (
+                "INTRO_CONTINUOUS_TOUR" in event.text
+                or "INTRO_CARD_READY" in event.text
+            )
             detail_auto = "step=detail" in event.text or "focus=detail" in event.text
-            if not intro_continuous:
+            welcome_ready = (
+                "[pantalla:welcome:ready]" in event.text
+                or (
+                    "phase=ready" in event.text
+                    and "welcome" in event.text
+                )
+            )
+            welcome_preparing = (
+                "[pantalla:welcome:preparing]" in event.text
+                or (
+                    "phase=preparing" in event.text
+                    and "welcome" in event.text
+                )
+            )
+            if not intro_continuous and not detail_auto and not welcome_preparing:
                 agent_session.interrupt()
+            if welcome_preparing:
+                logger.info(
+                    "[text_input] Ignoring preparing pantalla (silent prewarm): %.80s",
+                    event.text,
+                )
+                return
             if intro_continuous:
+                card_idx = "0"
+                for token in event.text.replace("]", " ").replace("[", " ").split():
+                    if token.startswith("index="):
+                        card_idx = token.split("=", 1)[-1].strip()
+                        break
+                    if token.startswith("intro:steps:"):
+                        card_idx = token.rsplit(":", 1)[-1]
+                        break
                 agent_session.generate_reply(
                     instructions=(
-                        "INTRO_CONTINUOUS_TOUR — UNA locución para las 3 tarjetas. "
-                        "If you already called present_content(intro_step, 0): continue "
-                        "seamlessly to dimensions → deliverables → «¿Empezamos?». "
-                        "If not started yet: get_session_state → present_content(intro_step, 0) "
-                        "→ gestos/voz → dimensiones uno a uno → entregables. "
-                        "NO pares entre tarjetas. PROHIBIDO present_content extra."
+                        f"INTRO_CARD_TOUR — tarjeta {card_idx} solamente. "
+                        "Si no empezaste: get_session_state → present_content(intro_step, "
+                        f"{card_idx}) UNA vez. "
+                        + (
+                            "Card 0: SOLO gestos/toque/voz (facts.points). "
+                            "PROHIBIDO dimensiones, radar, informe, correo, empezamos. PARA."
+                            if card_idx == "0"
+                            else "Card 1: SOLO «Estas son las cinco dimensiones…» → "
+                            "Autoridad → SSI → Mensaje → Influencia → Higiene (UNO A UNO, ~6s). "
+                            "PROHIBIDO gestos/entregables/lista con comas. PARA."
+                            if card_idx == "1"
+                            else "Card 2: SOLO «Te recibirás…» → Radar → Informe → Correo → "
+                            "«¿Empezamos el análisis?». PROHIBIDO gestos/dimensiones. PARA."
+                        )
                     ),
                 )
             elif detail_auto:
                 agent_session.generate_reply(
                     instructions=(
-                        "DETAIL_SECTION_AUTO — la UI ya avanzó a la sección activa. "
-                        "Llama get_session_state ÚNICAMENTE (PROHIBIDO present_content salvo "
-                        "que sea la primera entrada a detalle o el visitante pidió otra sección). "
-                        "Compón 2–3 oraciones desde facts.hint para audiencia C-level. "
-                        "PROHIBIDO decir Fortalezas/Oportunidades/Plan de acción como rótulos. "
-                        "Ancla en facts.evidence, facts.gaps o facts.tactics del informe real. "
-                        "PROHIBIDO navigate_journey(advance). Ritmo pausado, sin enumerar."
+                        "DETAIL_CONTINUOUS — UNA sola respuesta SIN silencios ni pausas. "
+                        "Teje facts.evidence → facts.gaps → facts.tactics en prosa encadenada. "
+                        "Parafrasea para facts.role en facts.company — explica POR QUÉ. "
+                        "PROHIBIDO parar, callar o END entre bloques o ítems. "
+                        "PROHIBIDO present_content extra ni get_session_state entre bloques. "
+                        "PROHIBIDO rótulos Fortalezas/Oportunidades/Plan. "
+                        "UI resalta secciones sola — tú sigues hablando sin interrupción."
+                    ),
+                )
+            elif welcome_ready:
+                agent_session.generate_reply(
+                    instructions=(
+                        "WELCOME READY (Screen 4a) — ORDEN ESTRICTO: "
+                        "1) get_session_state. "
+                        "2) HABLA PRIMERO (~10-12 s): saluda con facts.name, rol y empresa; "
+                        "2-3 frases sobre Huella Digital e invita a «cómo funciona». "
+                        "PROHIBIDO present_content. PROHIBIDO navigate_journey mientras hablas. "
+                        "3) SOLO después de terminar el saludo: navigate_journey(start_experience). "
+                        "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
                     ),
                 )
             else:
@@ -789,9 +851,8 @@ async def my_agent(ctx: JobContext):
                 instructions=(
                     "If intro onboarding (Así funciona) and visitor says continuar / "
                     "qué sigue / adelante / sigue / dale: do NOT call present_content. "
-                    "Continue the SAME continuous locución from where you paused — "
-                    "dimensions one by one → deliverables → «¿Empezamos?». "
-                    "Client flips cards/icons alone."
+                    "Continue ONLY the current card's speech — do NOT jump to dimensions or deliverables. "
+                    "Client advances cards after each speech."
                 ),
             )
 

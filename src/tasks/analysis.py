@@ -27,10 +27,12 @@ class AnalysisTask(HuellaPhaseTask):
                 phase scanning — Narrate public-source analysis in progress. Never invent
                 findings absent from state. Reassure briefly; wait for completion.
 
-                phase complete — Keep the existing narrative, then end by stating the
-                exact global score from content.overallScore / get_session_state.
-                Offer to reveal the dimension breakdown via navigate_journey
-                reveal_results when they are ready (intent, not keywords).
+                phase complete — Paraphrase facts.uiStandingLine warmly (role,
+                standing, strongest dimension). In the same flow add ONE strength
+                from facts.strengths/coverLines and ONE gap from facts.opportunities
+                or facts.weakestDimension — report data only, consultative C-level.
+                State exact global score from content.overallScore. Offer
+                navigate_journey reveal_results or dimension detail when ready.
 
                 phase results — The runtime focuses each result_dimension before you
                 speak. Narrate only the focused card: title, score, summary,
@@ -74,9 +76,12 @@ class AnalysisTask(HuellaPhaseTask):
             await generate_reply_safe(
                 self.session,
                 instructions=(
-                    "El análisis terminó. Cierra con el score global exacto de "
-                    "content.overallScore y ofrece revelar dimensiones con "
-                    "navigate_journey reveal_results cuando estén listos."
+                    "El análisis terminó. Paráfrasis cálida de facts.uiStandingLine "
+                    "(rol, standing, dimensión más fuerte) + UNA fortaleza de "
+                    "facts.strengths/coverLines y UNA brecha de facts.opportunities/"
+                    "weakestDimension — solo datos del informe, tono consultor C-level. "
+                    "Menciona el score global exacto (content.overallScore). "
+                    "Invita a abrir detalle de dimensión o navigate_journey(reveal_results)."
                 ),
                 tool_choice="auto",
                 tools=["get_session_state", "navigate_journey"],
