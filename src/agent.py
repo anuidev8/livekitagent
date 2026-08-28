@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, AsyncIterable
 import asyncio
 import importlib
 import json
@@ -27,7 +28,8 @@ from livekit.agents import (
     inference,
     room_io,
 )
-from livekit.plugins import ai_coustics, cartesia
+from livekit.agents.voice.agent import Agent as VoiceAgent, ModelSettings
+from livekit.plugins import ai_coustics, cartesia, elevenlabs
 
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
@@ -81,18 +83,34 @@ NOVA_VOICE = os.getenv("NOVA_VOICE", "lupe")
 NOVA_TURN_DETECTION = os.getenv("NOVA_TURN_DETECTION", "MEDIUM")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Voice backend: nova (default) | cartesia (STT/LLM Inference + Cartesia Sonic TTS)
+# Voice backend: nova | cartesia | elevenlabs
+# cartesia / elevenlabs = Deepgram STT + Bedrock LLM + plugin TTS
 VOICE_BACKEND = os.getenv("VOICE_BACKEND", "nova").strip().lower()
+HALF_CASCADE_BACKENDS = frozenset({"cartesia", "elevenlabs"})
+if VOICE_BACKEND not in {"nova", *HALF_CASCADE_BACKENDS}:
+    raise ValueError(
+        f"VOICE_BACKEND must be nova, cartesia, or elevenlabs — got {VOICE_BACKEND!r}"
+    )
 
 # Cartesia plugin — custom voice via CARTESIA_VOICE UUID (see huella-guide-cartesia)
 STT_MODEL = os.getenv("STT_MODEL", "deepgram/nova-3")
-STT_LANGUAGE = os.getenv("STT_LANGUAGE", "multi")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-31b-it")
+# Fixed Spanish beats multi for kiosk STT (logs: late transcripts with multi).
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "es")
+# Bedrock Claude by default — Gemma inference lacks reliable multi-tool chains here.
+# Nova Pro: better tool chains than Lite; same Bedrock grant as Nova Sonic.
+DEFAULT_CARTESIA_LLM = "amazon.nova-pro-v1:0"
+LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_CARTESIA_LLM)
+CARTESIA_LLM_TEMPERATURE = float(os.getenv("CARTESIA_LLM_TEMPERATURE", "0.4"))
 TTS_MODEL = os.getenv("TTS_MODEL", "sonic-3")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
 CARTESIA_VOICE = os.getenv("CARTESIA_VOICE", "").strip()
 TTS_LANGUAGE = os.getenv("TTS_LANGUAGE", "es")
 TTS_SPEED = os.getenv("TTS_SPEED", "1.0")
+
+# ElevenLabs plugin — custom voice via ELEVEN_VOICE_ID (only when VOICE_BACKEND=elevenlabs)
+ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "").strip()
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "").strip()
+ELEVEN_TTS_MODEL = os.getenv("ELEVEN_TTS_MODEL", "eleven_flash_v2_5").strip()
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -111,6 +129,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Prefiere: «cuando quieras», «iniciamos», «empezamos».
     Ritmo pausado y suave: oraciones completas, con pausa breve entre ellas.
     Solo español. Sin markdown ni listas.
+    PROHIBIDO etiquetas <thinking>, razonamiento interno o metatexto.
+    Tu salida es SOLO lo que el visitante escuchará en voz alta.
+    PROHIBIDO inglés en voz alta. PROHIBIDO narrar tu plan («I need to call»,
+    «The user is on», «first step»). Las herramientas se ejecutan en silencio.
 
     GENERAS TU PROPIO MENSAJE — no eres un lector de guión.
     La herramienta devuelve "facts" con datos y un "hint" de composición.
@@ -415,6 +437,43 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
 MAIN_INSTRUCTIONS = NOVA_INSTRUCTIONS
 INSTRUCTIONS = NOVA_INSTRUCTIONS
 
+# Cartesia pipeline is slow — UI may advance (e.g. welcome preparing→ready) before
+# the first TTS chunk. Force a fresh get_session_state before every reply.
+_RESTATE_BEFORE_SPEAK = (
+    "ANTES de hablar: llama get_session_state de nuevo — la UI pudo avanzar "
+    "mientras generabas. Narra SOLO el step/phase/facts actuales; PROHIBIDO "
+    "guión de una pantalla anterior."
+)
+
+_ON_ENTER_CARTESIA_EXTRA = (
+    "PIPELINE HALF-CASCADE — la UI avanza sola y más rápido que tú. "
+    "Habla SOLO español al visitante; cero inglés; cero planes en voz alta. "
+    "Herramientas en silencio. "
+    "Si welcome phase=ready: saludo con facts.name, luego navigate_journey(start_experience). "
+    "Si intro y dicen empecemos/sí/adelante: navigate_journey(start_analysis) al instante."
+)
+
+_HALF_CASCADE_ON_ENTER = (
+    "Conectaste al kiosk. Consulta el estado UI (herramienta, en silencio). "
+    "Luego habla SOLO en español al visitante según step/phase/facts — "
+    "sin inglés, sin narrar tu plan, sin nombrar herramientas. "
+    "welcome preparing: locución cálida de identificación. "
+    "welcome ready: saluda con facts.name (~10 s), luego navigate_journey(start_experience). "
+    "PROHIBIDO present_content en welcome ready. "
+    "Tras start_experience: silencio hasta [pantalla:intro]. "
+    "intro: present_content(intro_step,0) y tour continuo. "
+    "Si confirman análisis: navigate_journey(start_analysis)."
+)
+
+_WELCOME_READY_PANTALLA = (
+    "PANTALLA welcome:ready — perfil visible en pantalla. "
+    f"{_RESTATE_BEFORE_SPEAK} "
+    "Saludo CORTO con facts.name, rol y empresa (~10-12 s). "
+    "PROHIBIDO texto de cargando/identificando/preparing. "
+    "Tras hablar: navigate_journey(start_experience). "
+    "PROHIBIDO present_content en welcome:ready."
+)
+
 _FALLBACK_SESSION = {
     "ok": False,
     "error": "get_session_state_unavailable",
@@ -428,6 +487,229 @@ _FALLBACK_SESSION = {
 }
 
 
+def _pantalla_welcome_ready(cue: str) -> bool:
+    return ":welcome:ready" in cue or (
+        "step=welcome" in cue and "phase=ready" in cue
+    )
+
+
+def _pantalla_welcome_preparing(cue: str) -> bool:
+    return ":welcome:preparing" in cue or (
+        "step=welcome" in cue and "phase=preparing" in cue
+    )
+
+
+def _dispatch_pantalla_reply(agent_session: AgentSession, cue: str) -> None:
+    """Route a [pantalla:] cue to generate_reply (never as spoken user_input)."""
+    logger.info("[text_input] pantalla cue (not spoken): %.120s", cue)
+    intro_continuous = "INTRO_CONTINUOUS_TOUR" in cue
+    detail_auto = "step=detail" in cue or "focus=detail" in cue
+    if not intro_continuous:
+        agent_session.interrupt()
+    if intro_continuous:
+        agent_session.generate_reply(
+            instructions=(
+                f"{_RESTATE_BEFORE_SPEAK} "
+                "INTRO_CONTINUOUS_TOUR — UNA locución para las 3 tarjetas. "
+                "Si ya llamaste present_content(intro_step, 0): continúa sin pausa "
+                "dimensiones → entregables → «¿Empezamos?». "
+                "Si aún no empezaste: get_session_state → present_content(intro_step, 0) "
+                "→ gestos/voz → dimensiones una a una → entregables. "
+                "NO pares entre tarjetas. PROHIBIDO present_content extra."
+            ),
+        )
+    elif _pantalla_welcome_ready(cue):
+        agent_session.generate_reply(instructions=_WELCOME_READY_PANTALLA)
+    elif detail_auto:
+        agent_session.generate_reply(
+            instructions=(
+                f"{_RESTATE_BEFORE_SPEAK} "
+                "DETAIL_SECTION_AUTO — la UI ya avanzó a la sección activa. "
+                "Llama get_session_state ÚNICAMENTE (PROHIBIDO present_content salvo "
+                "que sea la primera entrada a detalle o el visitante pidió otra sección). "
+                "Compón 2–3 oraciones desde facts.hint para audiencia C-level. "
+                "PROHIBIDO decir Fortalezas/Oportunidades/Plan de acción como rótulos. "
+                "Ancla en facts.evidence, facts.gaps o facts.tactics del informe real. "
+                "PROHIBIDO navigate_journey(advance). Ritmo pausado, sin enumerar."
+            ),
+        )
+    else:
+        agent_session.generate_reply(
+            instructions=(
+                f"{_RESTATE_BEFORE_SPEAK} "
+                "Cambio de foco en pantalla. "
+                "Llama get_session_state, luego present_content si hace falta. "
+                "PROHIBIDO UI/pantalla/tarjeta meta."
+            ),
+        )
+
+
+class _ThinkingStripper:
+    """Streaming filter for <thinking>…</thinking> (Nova Pro/Lite on Bedrock)."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_thinking = False
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        out: list[str] = []
+        tag_open = "<thinking>"
+        tag_close = "</thinking>"
+        while self._buf:
+            lower = self._buf.lower()
+            if self._in_thinking:
+                close_at = lower.find(tag_close)
+                if close_at < 0:
+                    self._buf = ""
+                    break
+                self._buf = self._buf[close_at + len(tag_close) :]
+                self._in_thinking = False
+                continue
+            open_at = lower.find(tag_open)
+            if open_at < 0:
+                hold = self._buf.rfind("<")
+                if hold >= 0 and len(self._buf) - hold < len(tag_open) + 2:
+                    out.append(self._buf[:hold])
+                    self._buf = self._buf[hold:]
+                    break
+                out.append(self._buf)
+                self._buf = ""
+                break
+            out.append(self._buf[:open_at])
+            self._buf = self._buf[open_at + len(tag_open) :]
+            self._in_thinking = True
+        return "".join(out)
+
+
+def _strip_thinking_text(text: str) -> str:
+    return _ThinkingStripper().feed(text)
+
+
+_META_TOOL_RE = re.compile(
+    r"\b(get_session_state|navigate_journey|present_content|fill_search)\b",
+    re.I,
+)
+_META_PLAN_EN_RE = re.compile(
+    r"\b(the user (?:is on|has)|i need to call|i will call|the first step|"
+    r"then, i will|based on the|which means their)\b",
+    re.I,
+)
+_SCREEN_ID_RE = re.compile(r"\bwelcome:(?:ready|preparing)\b", re.I)
+
+
+def _looks_like_spanish_visitor(text: str) -> bool:
+    lower = text.lower().strip()
+    if re.search(r"[áéíóúñ¿¡]", lower):
+        return True
+    spanish_hints = (
+        "bienvenido",
+        "hola",
+        "perfecto",
+        "explor",
+        "dimens",
+        "análisis",
+        "empecemos",
+        "huella",
+        "presencia",
+        "¿",
+        "visitante",
+    )
+    return any(h in lower for h in spanish_hints)
+
+
+def _is_meta_planning_speech(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    lower = stripped.lower()
+    has_meta = bool(
+        _META_TOOL_RE.search(stripped)
+        or _META_PLAN_EN_RE.search(stripped)
+        or _SCREEN_ID_RE.search(stripped)
+        or "availableactions" in lower
+        or "ui step=" in lower
+        or "[pantalla:" in lower
+    )
+    if not has_meta:
+        return False
+    return not _looks_like_spanish_visitor(stripped)
+
+
+def _strip_speakable_text(text: str) -> str:
+    """Drop thinking tags and English tool-planning before TTS."""
+    cleaned = _strip_thinking_text(text)
+    if not cleaned.strip():
+        return ""
+    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    kept = [p.strip() for p in parts if p.strip() and not _is_meta_planning_speech(p)]
+    return " ".join(kept).strip()
+
+
+async def _filter_speech_stream(
+    text: AsyncIterable[str],
+) -> AsyncGenerator[str, None]:
+    """Strip meta-planning from LLM text before TTS or room transcription."""
+    stripper = _ThinkingStripper()
+    buf = ""
+
+    async for chunk in text:
+        raw = chunk if isinstance(chunk, str) else str(chunk)
+        buf += stripper.feed(raw)
+        while True:
+            m = re.search(r"(?<=[.!?])\s+", buf)
+            if not m:
+                break
+            sentence = buf[: m.start() + 1].strip()
+            buf = buf[m.end() :]
+            cleaned = _strip_speakable_text(sentence)
+            if cleaned:
+                yield cleaned + " "
+
+    tail = buf.strip()
+    if tail:
+        cleaned = _strip_speakable_text(tail)
+        if cleaned:
+            yield cleaned
+
+
+_ANALYSIS_CONFIRM_RE = re.compile(
+    r"\b(empecemos|empezamos|empezar|sí|si|adelante|dale|listo|vamos|"
+    r"iniciar|iniciemos|análisis|analisis|comenzar)\b",
+    re.I,
+)
+
+
+async def _maybe_start_analysis_from_voice(transcript: str) -> None:
+    """Half-cascade fallback: Nova Pro often narrates without calling tools."""
+    if not _ANALYSIS_CONFIRM_RE.search(transcript):
+        return
+    try:
+        raw = await rpc("get_session_state", retries=1)
+        state = json.loads(raw)
+    except Exception as exc:
+        logger.debug("[voice-hint] get_session_state skipped: %s", exc)
+        return
+    if state.get("step") != "intro":
+        return
+    if int(state.get("introCardIndex", 0)) < 2:
+        return
+    actions = state.get("availableActions") or []
+    if "start_analysis" not in actions:
+        return
+    try:
+        result = await rpc(
+            "navigate_journey", {"action": "start_analysis"}, retries=1
+        )
+        logger.info(
+            "[voice-hint] start_analysis from voice (%r): %s",
+            transcript,
+            result[:120],
+        )
+    except Exception as exc:
+        logger.warning("[voice-hint] start_analysis failed: %s", exc)
+
+
 class Assistant(Agent):
     """Nova Sonic host: fixed tools, UI-first spokenContent contract.
 
@@ -436,9 +718,56 @@ class Assistant(Agent):
     on_enter + generate_reply (Nova Sonic 2 mixed modalities).
     """
 
-    def __init__(self, on_enter_done: asyncio.Event | None = None) -> None:
-        super().__init__(instructions=NOVA_INSTRUCTIONS)
+    def __init__(
+        self,
+        on_enter_done: asyncio.Event | None = None,
+        *,
+        cartesia_pipeline: bool = False,
+    ) -> None:
+        super().__init__(
+            instructions=(
+                f"{NOVA_INSTRUCTIONS}\n{_ON_ENTER_CARTESIA_EXTRA}"
+                if cartesia_pipeline
+                else NOVA_INSTRUCTIONS
+            )
+        )
         self._on_enter_done = on_enter_done
+        self._cartesia_pipeline = cartesia_pipeline
+
+    def transcription_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ):
+        if not self._cartesia_pipeline:
+            return VoiceAgent.default.transcription_node(self, text, model_settings)
+        return self._cartesia_transcription_node(text, model_settings)
+
+    def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ):
+        if not self._cartesia_pipeline:
+            return VoiceAgent.default.tts_node(self, text, model_settings)
+        return VoiceAgent.default.tts_node(
+            self, _filter_speech_stream(text), model_settings
+        )
+
+    async def _cartesia_transcription_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ) -> AsyncGenerator[str, None]:
+        async for out in VoiceAgent.default.transcription_node(
+            self, _filter_speech_stream(text), model_settings
+        ):
+            if isinstance(out, str):
+                cleaned = _strip_speakable_text(out)
+                if cleaned:
+                    yield cleaned
+            else:
+                yield out
 
     async def on_enter(self) -> None:
         # Voice connects mid-journey (camera detect → identifying). Read the
@@ -455,37 +784,44 @@ class Assistant(Agent):
         # causes the AWS plugin to see fill_search as a mid-session addition,
         # triggering a full Bedrock stream recycle (~2 s silence penalty) the
         # first time identify_gate appears.
-        try:
-            handle = self.session.generate_reply(
-                instructions=(
-                    "Acabas de conectar con el kiosk Huella Digital. "
-                    "1) Llama get_session_state primero — la UI puede estar en "
-                    "cualquier pantalla, no asumas attract. "
-                    "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
-                    "   • attract: present_content(attract_tour, -1); invita a "
-                    "acercar la manilla; PROHIBIDO navigate_journey. "
-                    "   • welcome + phase preparing: UNA locución larga cálida de "
-                    "identificación (credencial, validación, preparación); "
-                    "PROHIBIDO herramientas extra ni checklist. "
-                    "   • welcome + phase ready: PRIMERO habla — saluda con "
-                    "facts.name, menciona rol + empresa, entrega el saludo corto "
-                    "(~10-12 s). SOLO DESPUÉS de terminar de hablar llama "
-                    "navigate_journey(start_experience). "
-                    "PROHIBIDO llamar navigate_journey ANTES de hablar. "
-                    "PROHIBIDO llamar present_content en welcome:ready. "
-                    "Tras start_experience ok: SILENCIO — no repitas nombre ni "
-                    "saludo; espera [pantalla:intro]. "
-                    "   • identify_gate / identify_search: explica que debe "
-                    "identificarse; manilla o buscar por nombre. En identify_search "
-                    "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
-                    "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
-                    "el resultado y avanza sola — NO llames navigate_journey. "
-                    "   • intro / analysis / detail / closing: sigue el flujo "
-                    "normal de esa pantalla. "
-                    "3) Compón desde facts.hint — no leas spokenContent literal. "
-                    "PROHIBIDO abrir con «Hola» o diminutivos."
-                ),
+        on_enter_instructions = (
+            _HALF_CASCADE_ON_ENTER
+            if self._cartesia_pipeline
+            else (
+                "Acabas de conectar con el kiosk Huella Digital. "
+                "1) Llama get_session_state primero — la UI puede estar en "
+                "cualquier pantalla, no asumas attract. "
+                "2) Narra la pantalla actual siguiendo NOVA_INSTRUCTIONS: "
+                "   • attract: present_content(attract_tour, -1); invita a "
+                "acercar la manilla; PROHIBIDO navigate_journey. "
+                "   • welcome + phase preparing: UNA locución larga cálida de "
+                "identificación (credencial, validación, preparación); "
+                "PROHIBIDO herramientas extra ni checklist. "
+                "   • welcome + phase ready: PRIMERO habla — saluda con "
+                "facts.name, menciona rol + empresa, entrega el saludo corto "
+                "(~10-12 s). SOLO DESPUÉS de terminar de hablar llama "
+                "navigate_journey(start_experience). "
+                "PROHIBIDO llamar navigate_journey ANTES de hablar. "
+                "PROHIBIDO llamar present_content en welcome:ready. "
+                "Tras start_experience ok: SILENCIO — no repitas nombre ni "
+                "saludo; espera [pantalla:intro]. "
+                "   • identify_gate / identify_search: explica que debe "
+                "identificarse; manilla o buscar por nombre. En identify_search "
+                "pide el nombre en voz alta, llama fill_search(query=<nombre>) "
+                "en cuanto lo diga y di solo 'Buscando…'. La UI auto-selecciona "
+                "el resultado y avanza sola — NO llames navigate_journey. "
+                "   • intro / analysis / detail / closing: sigue el flujo "
+                "normal de esa pantalla. "
+                "3) Compón desde facts.hint — no leas spokenContent literal. "
+                "PROHIBIDO abrir con «Hola» o diminutivos."
             )
+        )
+        if self._cartesia_pipeline:
+            on_enter_instructions = (
+                f"{on_enter_instructions} {_ON_ENTER_CARTESIA_EXTRA}"
+            )
+        try:
+            handle = self.session.generate_reply(instructions=on_enter_instructions)
             await handle
         finally:
             # Signal that on_enter has fully completed (audio delivered).
@@ -581,7 +917,7 @@ def _plugin_speed() -> float:
         return 1.0
 
 
-def _build_tts() -> cartesia.TTS:
+def _build_cartesia_tts() -> cartesia.TTS:
     """Custom Cartesia voices require the plugin + API key."""
     if not CARTESIA_API_KEY:
         raise RuntimeError(
@@ -612,26 +948,95 @@ def _build_tts() -> cartesia.TTS:
         voice=CARTESIA_VOICE,
         language=TTS_LANGUAGE,
         speed=_plugin_speed(),
-        word_timestamps=False,
+        word_timestamps=True,
     )
 
 
-def _build_cartesia_session() -> AgentSession:
-    """STT/LLM via Inference; TTS via Cartesia plugin (custom voice)."""
+def _build_elevenlabs_tts() -> elevenlabs.TTS:
+    """ElevenLabs custom / cloned voices via voice_id."""
+    if not ELEVEN_API_KEY:
+        raise RuntimeError(
+            "ELEVEN_API_KEY is required when VOICE_BACKEND=elevenlabs. "
+            "Create one at https://elevenlabs.io/app/settings/api-keys"
+        )
+    if not ELEVEN_VOICE_ID:
+        raise RuntimeError(
+            "ELEVEN_VOICE_ID is required when VOICE_BACKEND=elevenlabs. "
+            "Copy the voice ID from ElevenLabs Voice Library or your PVC."
+        )
+    model = ELEVEN_TTS_MODEL.removeprefix("elevenlabs/").strip() or "eleven_flash_v2_5"
+    logger.info(
+        "ElevenLabs TTS model=%s voice=%s… lang=%s key_set=%s",
+        model,
+        ELEVEN_VOICE_ID[:8],
+        TTS_LANGUAGE,
+        bool(ELEVEN_API_KEY),
+    )
+    return elevenlabs.TTS(
+        model=model,
+        voice_id=ELEVEN_VOICE_ID,
+        language=TTS_LANGUAGE,
+        api_key=ELEVEN_API_KEY,
+        voice_settings=elevenlabs.VoiceSettings(
+            speed=_plugin_speed(),
+            stability=0.5,
+            similarity_boost=0.75,
+        ),
+    )
+
+
+def _build_half_cascade_tts() -> cartesia.TTS | elevenlabs.TTS:
+    if VOICE_BACKEND == "cartesia":
+        return _build_cartesia_tts()
+    if VOICE_BACKEND == "elevenlabs":
+        return _build_elevenlabs_tts()
+    raise RuntimeError(f"No half-cascade TTS for VOICE_BACKEND={VOICE_BACKEND!r}")
+
+
+def _build_cartesia_llm() -> inference.LLM | aws.LLM:
+    """Cartesia pipeline LLM — Bedrock Claude default; Inference if model has '/'."""
+    if "/" in LLM_MODEL:
+        logger.info("Cartesia LLM via LiveKit Inference model=%s", LLM_MODEL)
+        return inference.LLM(model=LLM_MODEL)
+    if not os.getenv("AWS_ACCESS_KEY_ID") or not os.getenv("AWS_SECRET_ACCESS_KEY"):
+        logger.warning(
+            "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY missing — "
+            "Bedrock LLM calls will fail until secrets are set."
+        )
+    logger.info(
+        "Cartesia LLM via Bedrock model=%s region=%s",
+        LLM_MODEL,
+        AWS_REGION,
+    )
+    return aws.LLM(
+        model=LLM_MODEL,
+        region=AWS_REGION,
+        temperature=CARTESIA_LLM_TEMPERATURE,
+        tool_choice="auto",
+    )
+
+
+def _build_half_cascade_session() -> AgentSession:
+    """STT via Inference; LLM via Bedrock; TTS via Cartesia or ElevenLabs plugin."""
     return AgentSession(
         stt=inference.STT(model=STT_MODEL, language=STT_LANGUAGE),
-        llm=inference.LLM(model=LLM_MODEL),
-        tts=_build_tts(),
+        llm=_build_cartesia_llm(),
+        tts=_build_half_cascade_tts(),
+        use_tts_aligned_transcript=True,
         turn_handling=TurnHandlingOptions(
             turn_detection=inference.TurnDetector(),
-            # Cartesia pipeline is slower than Nova; wait longer before committing
+            # Half-cascade is slower than Nova; wait longer before committing
             # partial STT ("¿Cómo" alone) and start TTS earlier once a turn ends.
-            endpointing={"min_delay": 0.9, "max_delay": 4.5},
+            endpointing={"min_delay": 1.2, "max_delay": 4.5},
             interruption={"min_words": 2, "min_duration": 0.65},
             preemptive_generation={"preemptive_tts": True},
         ),
         max_tool_steps=8,
     )
+
+
+# Backward-compatible alias
+_build_cartesia_session = _build_half_cascade_session
 
 
 def _build_nova_realtime() -> aws.realtime.RealtimeModel:
@@ -669,19 +1074,27 @@ server = AgentServer(
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def my_agent(ctx: JobContext):
-    use_cartesia = VOICE_BACKEND == "cartesia"
+    use_half_cascade = VOICE_BACKEND in HALF_CASCADE_BACKENDS
 
-    if use_cartesia:
+    if use_half_cascade:
+        llm_backend = "inference" if "/" in LLM_MODEL else "bedrock"
         ctx.log_context_fields = {
             "room": ctx.room.name,
             "agent": AGENT_NAME,
-            "voice_backend": "cartesia-plugin",
-            "tts_model": TTS_MODEL,
-            "cartesia_voice": CARTESIA_VOICE,
+            "voice_backend": VOICE_BACKEND,
+            "tts_model": (
+                ELEVEN_TTS_MODEL if VOICE_BACKEND == "elevenlabs" else TTS_MODEL
+            ),
+            "cartesia_voice": CARTESIA_VOICE if VOICE_BACKEND == "cartesia" else "",
+            "elevenlabs_voice": (
+                ELEVEN_VOICE_ID if VOICE_BACKEND == "elevenlabs" else ""
+            ),
             "stt_model": STT_MODEL,
+            "stt_language": STT_LANGUAGE,
             "llm_model": LLM_MODEL,
+            "llm_backend": llm_backend,
         }
-        session = _build_cartesia_session()
+        session = _build_half_cascade_session()
     else:
         ctx.log_context_fields = {
             "room": ctx.room.name,
@@ -719,85 +1132,57 @@ async def my_agent(ctx: JobContext):
     # that event are suppressed — on_enter already covers the initial screen.
     # Subsequent cues (real screen changes) are processed normally.
     _on_enter_done = asyncio.Event()
-    # Cartesia on_enter + TTS can take 15s+; queue [pantalla:] cues instead of dropping.
+    # Nova: suppress duplicate pantalla during on_enter. Cartesia: interrupt stale
+    # on_enter when UI advances (e.g. welcome preparing→ready) — never queue stale.
     _pantalla_queue: list[str] = []
+    _pantalla_handled_during_enter: str | None = None
 
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
     ) -> None:
         is_pantalla = event.text.startswith("[pantalla:")
         if is_pantalla and not _on_enter_done.is_set():
-            if use_cartesia:
-                _pantalla_queue.append(event.text)
+            if use_half_cascade:
+                if _pantalla_welcome_preparing(event.text):
+                    logger.info(
+                        "[text_input] Ignoring preparing pantalla (on_enter active): %.80s",
+                        event.text,
+                    )
+                    return
                 logger.info(
-                    "[text_input] Queued pantalla cue (on_enter active): %.80s",
+                    "[text_input] Interrupting on_enter for pantalla: %.80s",
                     event.text,
                 )
+                nonlocal _pantalla_handled_during_enter
+                _pantalla_handled_during_enter = event.text
+                _dispatch_pantalla_reply(agent_session, event.text)
             else:
                 logger.info(
                     "[text_input] Suppressing pantalla cue (on_enter still active): %.80s",
                     event.text,
                 )
             return
-        # CRITICAL: never pass the raw [pantalla:] English cue as user_input —
-        # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
-        # so the model runs tools and speaks visitor-facing Spanish only.
         if is_pantalla:
-            logger.info(
-                "[text_input] pantalla cue (not spoken): %.120s",
-                event.text,
-            )
-            intro_continuous = "INTRO_CONTINUOUS_TOUR" in event.text
-            detail_auto = "step=detail" in event.text or "focus=detail" in event.text
-            if not intro_continuous:
-                agent_session.interrupt()
-            if intro_continuous:
-                agent_session.generate_reply(
-                    instructions=(
-                        "INTRO_CONTINUOUS_TOUR — UNA locución para las 3 tarjetas. "
-                        "If you already called present_content(intro_step, 0): continue "
-                        "seamlessly to dimensions → deliverables → «¿Empezamos?». "
-                        "If not started yet: get_session_state → present_content(intro_step, 0) "
-                        "→ gestos/voz → dimensiones uno a uno → entregables. "
-                        "NO pares entre tarjetas. PROHIBIDO present_content extra."
-                    ),
-                )
-            elif detail_auto:
-                agent_session.generate_reply(
-                    instructions=(
-                        "DETAIL_SECTION_AUTO — la UI ya avanzó a la sección activa. "
-                        "Llama get_session_state ÚNICAMENTE (PROHIBIDO present_content salvo "
-                        "que sea la primera entrada a detalle o el visitante pidió otra sección). "
-                        "Compón 2–3 oraciones desde facts.hint para audiencia C-level. "
-                        "PROHIBIDO decir Fortalezas/Oportunidades/Plan de acción como rótulos. "
-                        "Ancla en facts.evidence, facts.gaps o facts.tactics del informe real. "
-                        "PROHIBIDO navigate_journey(advance). Ritmo pausado, sin enumerar."
-                    ),
-                )
-            else:
-                agent_session.generate_reply(
-                    instructions=(
-                        "Cambio de foco en pantalla. "
-                        "Llama get_session_state, luego present_content si hace falta. "
-                        "PROHIBIDO UI/pantalla/tarjeta meta."
-                    ),
-                )
+            _dispatch_pantalla_reply(agent_session, event.text)
         else:
             agent_session.interrupt()
             agent_session.generate_reply(
                 user_input=event.text,
                 instructions=(
-                    "If intro onboarding (Así funciona) and visitor says continuar / "
-                    "qué sigue / adelante / sigue / dale: do NOT call present_content. "
-                    "Continue the SAME continuous locución from where you paused — "
-                    "dimensions one by one → deliverables → «¿Empezamos?». "
-                    "Client flips cards/icons alone."
+                    f"{_RESTATE_BEFORE_SPEAK} "
+                    "Si intro y el visitante confirma análisis (empecemos / sí / "
+                    "adelante / empezamos): navigate_journey(start_analysis) de "
+                    "inmediato — no describas pantallas que no existen. "
+                    "Si intro onboarding (Así funciona) y dice continuar / "
+                    "qué sigue / adelante: continúa la MISMA locución — "
+                    "dimensiones → entregables → «¿Empezamos?». "
+                    "PROHIBIDO present_content extra; el cliente avanza tarjetas solo."
                 ),
             )
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    if use_cartesia:
+    if use_half_cascade:
 
         @session.on("error")
         def _on_session_error(ev) -> None:
@@ -809,12 +1194,20 @@ async def my_agent(ctx: JobContext):
                 exc_info=isinstance(err, BaseException),
             )
 
-        logger.info(
-            "Starting Cartesia plugin tts=%s voice=%s… lang=%s",
-            TTS_MODEL,
-            CARTESIA_VOICE[:8] if CARTESIA_VOICE else "",
-            TTS_LANGUAGE,
-        )
+        if VOICE_BACKEND == "elevenlabs":
+            logger.info(
+                "Starting ElevenLabs plugin model=%s voice=%s… lang=%s",
+                ELEVEN_TTS_MODEL,
+                ELEVEN_VOICE_ID[:8] if ELEVEN_VOICE_ID else "",
+                TTS_LANGUAGE,
+            )
+        else:
+            logger.info(
+                "Starting Cartesia plugin tts=%s voice=%s… lang=%s",
+                TTS_MODEL,
+                CARTESIA_VOICE[:8] if CARTESIA_VOICE else "",
+                TTS_LANGUAGE,
+            )
     else:
         logger.info(
             "Starting Nova Sonic voice=%s region=%s refresh=%ss",
@@ -828,6 +1221,8 @@ async def my_agent(ctx: JobContext):
         if not event.is_final:
             return
         logger.info("[USER] %s", event.transcript)
+        if use_half_cascade:
+            asyncio.create_task(_maybe_start_analysis_from_voice(event.transcript))
 
     @session.on("conversation_item_added")
     def _on_item_added(event) -> None:
@@ -837,10 +1232,19 @@ async def my_agent(ctx: JobContext):
         if text:
             interrupted = getattr(item, "interrupted", False)
             suffix = " [interrupted]" if interrupted else ""
-            logger.info("[%s]%s %s", role.upper(), suffix, text)
+            spoken = _strip_speakable_text(text) or _strip_thinking_text(text)
+            if spoken.strip():
+                logger.info("[%s]%s %s", role.upper(), suffix, spoken)
 
     async def _replay_queued_pantalla() -> None:
         await _on_enter_done.wait()
+        if use_half_cascade:
+            if _pantalla_handled_during_enter:
+                logger.info(
+                    "[text_input] Skipping pantalla replay — handled during on_enter: %.80s",
+                    _pantalla_handled_during_enter,
+                )
+            return
         if not _pantalla_queue:
             return
         cues = list(_pantalla_queue)
@@ -852,13 +1256,13 @@ async def my_agent(ctx: JobContext):
             )
         cue = cues[-1]
         logger.info("[text_input] Replaying queued pantalla: %.120s", cue)
-        _pantalla_text_input_handler(session, room_io.TextInputEvent(text=cue))
+        _dispatch_pantalla_reply(session, cue)
 
     replay_task = asyncio.create_task(_replay_queued_pantalla())
 
     room_opts = room_io.RoomOptions(
         # Brief browser reconnects should not tear down a slow Cartesia session.
-        close_on_disconnect=not use_cartesia,
+        close_on_disconnect=not use_half_cascade,
         # lk.chat text input MUST remain enabled — notifyGuideScreen (client)
         # sends [pantalla:…] cues via sendText on this topic. These are NOT
         # participant attribute updates; they are real screen-nudge messages
@@ -874,14 +1278,17 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
-    if use_cartesia:
+    if use_half_cascade:
         room_opts.text_output = room_io.TextOutputOptions(
             sync_transcription=True,
             transcription_speed_factor=1.15,
         )
 
     await session.start(
-        agent=Assistant(on_enter_done=_on_enter_done),
+        agent=Assistant(
+            on_enter_done=_on_enter_done,
+            cartesia_pipeline=use_half_cascade,
+        ),
         room=ctx.room,
         room_options=room_opts,
     )

@@ -17,6 +17,7 @@ dependencies = [
     "aws-sdk-bedrock-runtime>=0.2.0,<0.10.0",
     "python-dotenv",
     "livekit-plugins-cartesia>=1.7.0",
+    "livekit-plugins-elevenlabs>=1.7.0",
 ]
 
 [dependency-groups]
