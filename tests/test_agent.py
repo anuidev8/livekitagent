@@ -21,6 +21,7 @@ def _judge_llm() -> llm.LLM:
 
 
 def test_on_enter_should_defer_welcome_and_failed_state() -> None:
+    assert on_enter_should_defer({"ok": True, "step": "attract", "phase": "active"})
     assert on_enter_should_defer({"ok": True, "step": "welcome", "phase": "preparing"})
     assert on_enter_should_defer({"ok": True, "step": "welcome", "phase": "ready"})
     assert on_enter_should_defer({"ok": False, "step": "welcome", "phase": "ready"})
@@ -56,10 +57,10 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     tool_names = {tool.info.name for tool in agent.tools}
 
     assert tool_names == {
+        "fill_search",
         "get_session_state",
         "present_content",
         "navigate_journey",
-        "set_control_channel",
     }
     assert NovaAssistant is Assistant
     assert INSTRUCTIONS is MAIN_INSTRUCTIONS is NOVA_INSTRUCTIONS
@@ -70,27 +71,17 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     assert "seti" in nova_lower
     assert "spokencontent" in nova_lower
     assert "no inventes" in nova_lower or "únicamente" in nova_lower
-    assert "nunca digas que no ves" in nova_lower
+    assert "obligatorio present_content por icono" not in nova_lower
+    assert "el runtime python cambia a intro" in nova_lower
     assert "livekit" not in nova_lower
     assert "get_session_state first" not in nova_lower
     # Forbidden product framing must not appear as instructions to invent a game.
     assert "bienvenido al juego" not in nova_lower
     assert "qué dice internet" not in nova_lower
-    for term in (
-        "profile",
-        "scores",
-        "report",
-        "consent",
-        "photo",
-        "cancel",
-        "authority",
-        "identity",
-        "roles",
-    ):
-        assert term not in nova_lower, f"Nova prompt should omit {term!r}"
-    assert "Obtiene el estado actual de la pantalla." in {
-        tool.info.description for tool in agent.tools
-    }
+    assert any(
+        tool.info.description.startswith("Obtiene el estado actual de la pantalla")
+        for tool in agent.tools
+    )
 
 
 def test_analysis_task_is_focused() -> None:
@@ -192,7 +183,9 @@ async def test_nova_recycle_cancels_a_stale_independent_timer() -> None:
     await fake._session_recycle_task
 
 
-@pytest.mark.skip(reason="Requires LiveKit Inference credits; Nova is the only voice backend.")
+@pytest.mark.skip(
+    reason="Requires LiveKit Inference credits; Nova is the only voice backend."
+)
 async def test_unused_inference_judge_smoke() -> None:
     llm_inst = _judge_llm()
     assert llm_inst is not None

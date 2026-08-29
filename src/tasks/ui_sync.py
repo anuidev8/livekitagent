@@ -20,7 +20,6 @@ from typing import Any, Literal
 from livekit.agents import AgentSession
 
 from rpc_client import rpc
-from narration_barrier import get_session_narration_barrier
 from tasks.speech import generate_reply_safe, wait_for_agent_idle
 
 logger = logging.getLogger("agent.ui_sync")
@@ -65,6 +64,7 @@ class PresentStep:
     dimension_id: str = ""
     section: str = ""
     fallback_speak: str = ""
+    anchors: tuple[str, ...] = ()
     extra_instructions: str = ""
     brief: bool = False
     pace: IntroPace | None = None
@@ -98,41 +98,23 @@ def _paint_delay_ms(target: str) -> int:
 
 def _pace_instructions(
     pace: IntroPace,
-    spoken: str,
-    points: list[str],
+    anchors: tuple[str, ...],
     extra: str,
 ) -> str:
-    if pace == "card":
-        anchor = spoken or "; ".join(points)
-        return (
-            "El foco YA está en pantalla. No uses herramientas. "
-            f"Di este guion en español, sin añadir ideas nuevas ni repetir pantallas anteriores: "
-            f"«{anchor}». Tono cálido. Para al terminar. "
-            f"{extra}"
-        ).strip()
-    if pace == "transition":
-        return (
-            "El foco YA está en pantalla. No uses herramientas. "
-            f"Di EXACTAMENTE esta frase de puente, sin añadir nada antes ni después: «{spoken}». "
-            f"{extra}"
-        ).strip()
+    clean_anchors = [item for item in anchors if item]
+    anchor_text = json.dumps(clean_anchors, ensure_ascii=False)
+    shape = {
+        "card": "3 a 6 frases breves que cubran los puntos",
+        "transition": "una sola frase breve de transición",
+        "spotlight": "una frase breve sobre este elemento",
+    }[pace]
     return (
-        "El icono YA está resaltado. No uses herramientas. "
-        f"Di EXACTAMENTE esta frase, sin añadir nada antes ni después: «{spoken}». "
+        "El foco ya está visible. No uses herramientas. "
+        f"Compón {shape} en español a partir de estas anclas: {anchor_text}. "
+        "Parafrasea con naturalidad: no leas las anclas como lista ni copies una frase de la UI. "
+        "No repitas contenido de segmentos anteriores y para al terminar. "
         f"{extra}"
     ).strip()
-
-
-async def _arm_client_narration_ack(segment_id: str, token: int) -> None:
-    await rpc(
-        "director_narration_arm",
-        {
-            "segmentId": segment_id,
-            "token": token,
-            "timeoutMs": 120_000,
-        },
-        timeout=5.0,
-    )
 
 
 async def speak_director_line(
@@ -141,10 +123,9 @@ async def speak_director_line(
     segment_id: str,
     instructions: str,
     wait_for_playout: bool = True,
-    wait_for_client_ack: bool = True,
     interrupt_first: bool = False,
 ) -> bool:
-    """Speak one director line, wait for kiosk room-audio ack.
+    """Speak one director line and wait for server-observed audio playout.
 
     Do not interrupt between orchestrator steps — that cuts the previous
     segment while room audio is still playing. Only the orchestrator entry
@@ -154,31 +135,17 @@ async def speak_director_line(
         session.interrupt()
     await wait_for_agent_idle(session)
 
-    barrier = get_session_narration_barrier()
-    token = barrier.arm(segment_id)
-    try:
-        await _arm_client_narration_ack(segment_id, token)
-    except Exception as exc:
-        logger.warning("director_narration_arm failed segment=%s: %s", segment_id, exc)
-
     handle = await generate_reply_safe(
         session,
         instructions=instructions,
-        allow_interruptions=False,
         wait_for_playout=False,
     )
-    barrier.open_ack()
     if wait_for_playout:
         await handle.wait_for_playout()
     await wait_for_agent_idle(session)
-
-    if not wait_for_client_ack:
-        return True
-
-    acked = await barrier.wait(segment_id, token, timeout=120.0)
-    if not acked:
-        logger.warning("director client ack timeout segment=%s", segment_id)
-    return acked
+    # SpeechHandle playout is the sequencing authority. Active-speaker events
+    # are useful for UI chrome, but are too coarse to acknowledge a segment.
+    return True
 
 
 def _present_label(
@@ -228,13 +195,13 @@ async def present_and_speak(
     target: str,
     index: int,
     fallback_speak: str,
+    anchors: tuple[str, ...] = (),
     extra_instructions: str = "",
     dimension_id: str = "",
     section: str = "",
     brief: bool = False,
     pace: IntroPace | None = None,
     wait_for_playout: bool = True,
-    wait_for_client_ack: bool = True,
 ) -> dict[str, Any]:
     """Update the kiosk UI first, narrate, then wait for room audio to finish."""
     data = await rpc_present_content(
@@ -254,16 +221,13 @@ async def present_and_speak(
         return data
 
     await asyncio.sleep(_paint_delay_ms(target) / 1000)
-    spoken = (
-        str(data.get("spokenContent") or data.get("narration") or "").strip()
-        or fallback_speak
-    )
+    resolved_anchors = anchors or tuple(_facts_points(data))
+    if not resolved_anchors and fallback_speak:
+        resolved_anchors = (fallback_speak,)
     resolved_pace: IntroPace = pace or ("spotlight" if brief else "card")
-    points = _facts_points(data)
     instructions = _pace_instructions(
         resolved_pace,
-        spoken,
-        points,
+        resolved_anchors,
         extra_instructions,
     )
     logger.info("director speak start: %s pace=%s", label, resolved_pace)
@@ -272,9 +236,8 @@ async def present_and_speak(
         segment_id=label,
         instructions=instructions,
         wait_for_playout=wait_for_playout,
-        wait_for_client_ack=wait_for_client_ack,
     )
-    logger.info("director speak done: %s client_ack=%s", label, acked)
+    logger.info("director speak done: %s playout_complete=%s", label, acked)
     return data
 
 
@@ -283,7 +246,6 @@ async def run_present_steps(
     steps: Iterable[PresentStep],
     *,
     wait_for_playout: bool = True,
-    wait_for_client_ack: bool = True,
     should_continue: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Run a scripted UI+voice sequence one step at a time (no pipelining)."""
@@ -296,11 +258,11 @@ async def run_present_steps(
             target=step.target,
             index=step.index,
             fallback_speak=step.fallback_speak,
+            anchors=step.anchors,
             extra_instructions=step.extra_instructions,
             dimension_id=step.dimension_id,
             section=step.section,
             brief=step.brief,
             pace=step.pace,
             wait_for_playout=wait_for_playout,
-            wait_for_client_ack=wait_for_client_ack,
         )

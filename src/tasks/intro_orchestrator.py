@@ -65,15 +65,17 @@ def _points_line(step: dict[str, Any]) -> str:
     return ". ".join(str(p).strip() for p in points if str(p).strip())
 
 
-def _card_script(step: dict[str, Any]) -> str:
-    voice = str(step.get("voiceScript") or "").strip()
-    if voice:
-        return voice
-    return _points_line(step)
-
-
-def _transition_line(step: dict[str, Any]) -> str:
-    return str(step.get("transitionSpeak") or step.get("title") or "").strip()
+def _step_anchors(
+    step: dict[str, Any], *, include_points: bool = True
+) -> tuple[str, ...]:
+    title = str(step.get("title") or "").strip()
+    points = step.get("points")
+    rows = (
+        [str(item).strip() for item in points]
+        if include_points and isinstance(points, list)
+        else []
+    )
+    return tuple(item for item in (title, *rows) if item)
 
 
 async def _still_on_intro() -> bool:
@@ -113,7 +115,7 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
         PresentStep(
             target="intro_step",
             index=0,
-            fallback_speak=_card_script(step0),
+            anchors=_step_anchors(step0),
             pace="card",
             extra_instructions=(
                 "Cubre todos los puntos en facts.points sin omitir ninguno. "
@@ -127,7 +129,7 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
         PresentStep(
             target="intro_step",
             index=1,
-            fallback_speak=_transition_line(step1),
+            anchors=_step_anchors(step1, include_points=False),
             pace="transition",
             extra_instructions="Puente breve antes de los iconos de dimensiones.",
         )
@@ -142,7 +144,14 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
                 target="intro_card_dimension",
                 index=-1,
                 dimension_id=dim_id,
-                fallback_speak=_spotlight_line(concept),
+                anchors=tuple(
+                    item
+                    for item in (
+                        str(concept.get("title") or "").strip(),
+                        _spotlight_line(concept),
+                    )
+                    if item
+                ),
                 pace="spotlight",
                 extra_instructions="Solo esta dimensión.",
             )
@@ -153,7 +162,7 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
         PresentStep(
             target="intro_step",
             index=2,
-            fallback_speak=_transition_line(step2),
+            anchors=_step_anchors(step2, include_points=False),
             pace="transition",
             extra_instructions="Puente breve antes de los entregables.",
         )
@@ -167,7 +176,14 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
                 target="intro_deliverable",
                 index=idx,
                 dimension_id=del_id,
-                fallback_speak=_spotlight_line(item),
+                anchors=tuple(
+                    anchor
+                    for anchor in (
+                        str(item.get("title") or "").strip(),
+                        _spotlight_line(item),
+                    )
+                    if anchor
+                ),
                 pace="spotlight",
                 extra_instructions="Solo este entregable.",
             )
@@ -179,6 +195,7 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
 async def _run_intro_tour(session: AgentSession, token: int) -> None:
     logger.info("intro orchestrator start token=%s", token)
     session.interrupt()
+    session.input.set_audio_enabled(False)
     try:
         if not await _step_ok(token):
             return
@@ -205,11 +222,10 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
             segment_id="intro_tour:closing_question",
             instructions=(
                 "El recorrido «Así funciona» ya terminó. "
-                "Pregunta UNA vez, con calma: «¿Empezamos el análisis?» y PARA. "
+                "Compón una pregunta breve invitando a empezar el análisis y PARA. "
                 "PROHIBIDO repetir gestos, dimensiones o entregables."
             ),
             wait_for_playout=True,
-            wait_for_client_ack=True,
         )
         logger.info("intro orchestrator complete token=%s", token)
     except asyncio.CancelledError:
@@ -217,3 +233,5 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         raise
     except Exception:
         logger.exception("intro orchestrator failed token=%s", token)
+    finally:
+        session.input.set_audio_enabled(True)

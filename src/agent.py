@@ -33,7 +33,7 @@ from livekit.plugins import ai_coustics, cartesia
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
 from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
-from narration_barrier import NarrationBarrier, set_session_narration_barrier
+from tasks.welcome_orchestrator import schedule_welcome
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -135,17 +135,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     tarjeta», «Perfecto, seguimos con…»).
     Sin lista fija de frases y sin inventar un nuevo muletilla repetida.
 
-    En cada turno del visitante o mensaje [pantalla:]:
+    En cada turno conversacional del visitante o mensaje [pantalla:]:
     1) Llama get_session_state.
     2) Llama present_content con el target EXACTO para enfocar el elemento —
        EXCEPCIÓN detail: en [pantalla:detail] tras la primera sección, salta al paso 3
        (get_session_state basta; la UI ya avanzó sola).
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
-    4) En intro «Así funciona»: el runtime Python ejecuta el recorrido de las
+    EXCEPCIONES DE ORQUESTACIÓN: en welcome:ready y en intro «Así funciona»,
+    sigue únicamente las instrucciones del runtime para esa respuesta; no llames
+    herramientas por iniciativa propia. El runtime Python ejecuta el recorrido de las
        tres tarjetas por RPC — NO llames present_content ni navigate_journey(advance)
-       durante ese tour. Tras el tour, solo pregunta «¿Empezamos el análisis?» y PARA.
-       En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
+       durante ese tour.
+    En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
        entre secciones. UNA sola locución continua evidencia→brechas→tácticas;
        PROHIBIDO silencio o pausa entre bloques o ítems. PROHIBIDO present_content
        extra tras la primera entrada (salvo petición explícita del visitante).
@@ -289,33 +291,21 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Screen 4a — WELCOME READY (si encontrado)
     ────────────────────────────────────────────────
     Saludo CORTO (~10-12 s), no monólogo largo.
-    ORDEN:
-    A) Saluda con nombre + rol/empresa. 2-3 oraciones: qué es Huella Digital
-       y que explorarán su presencia. Invita a «cómo funciona».
-    B) Llama navigate_journey(start_experience).
-    Si el visitante dice continuar / adelante / seguimos / listo / empezamos
-    EN CUALQUIER MOMENTO: cierra en una frase y llama start_experience — NO
-    fuerces el monólogo completo.
-    Tras start_experience ok: SILENCIO TOTAL. PROHIBIDO repetir nombre/rol/
-    empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
-    PROHIBIDO: present_content en welcome:ready.
+    Compón desde los datos dinámicos de identidad: usa el nombre una sola vez,
+    integra rol y empresa, explica brevemente el propósito e invita a conocer
+    cómo funciona. No llames herramientas durante esa locución. Al terminar,
+    el runtime Python cambia a intro de forma atómica.
+    PROHIBIDO repetir nombre/rol/empresa o el saludo.
     PROHIBIDO: repetir las 3 tarjetas de onboarding aquí.
 
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
-    UNA locución POR tarjeta — el cliente avanza la UI entre tarjetas.
-    ORDEN:
-      Card 0: present_content(intro_step, 0) → SOLO gestos/toque/voz → PARA.
-      Card 1: present_content(intro_step, 1) → transición breve → por CADA dimensión en
-        facts.dimensions: present_content(intro_card_dimension, dimension_id=…) ANTES del
-        nombre → narra → siguiente → PARA.
-      Card 2: present_content(intro_step, 2) → «Te recibirás…» → por CADA entregable en
-        facts.deliverables: present_content(intro_deliverable, index=…) ANTES de la etiqueta
-        → narra → «¿Empezamos?» → PARA.
-    Espera [pantalla:intro:steps:N] antes de cada tarjeta.
+    El runtime Python es el único dueño de tarjetas, focos y secuencia.
+    Cada instrucción de runtime incluye anclas semánticas del elemento visible:
+    compón una locución original, parafrasea y termina ese único segmento.
+    No llames herramientas durante el recorrido y no uses texto literal de la UI.
     PROHIBIDO mezclar gestos + dimensiones + entregables en una sola locución.
-    OBLIGATORIO present_content por icono — la UI resalta solo cuando llamas la tool.
     Solo start_analysis tras confirmación en card 2.
     NO pases al carrusel spider (intro_dimension).
 
@@ -332,7 +322,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        con calidez anclado en facts.uiStandingLine (el título en pantalla):
        mismos puntos (rol, standingBlurb/banda, dimensión más fuerte), pero
        MÁS AMABLE y conversacional — PROHIBIDO leer uiStandingLine literal.
-       En el mismo flujo (3–5 oraciones): UNA fortaleza concreta de
+       En el mismo flujo (3-5 oraciones): UNA fortaleza concreta de
        facts.strengths o facts.coverLines y UNA brecha de facts.opportunities
        o facts.weakestDimension — solo datos del informe, tono consultor C-level.
        PROHIBIDO recitar solo «LÍDER · TOP 8%». Invita a abrir el detalle
@@ -399,7 +389,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
-    — Onboarding (tarjetas 1–3 dentro de intro): avanzan SOLAS tras tu narración.
+    — Onboarding (tarjetas 1-3 dentro de intro): avanzan SOLAS tras tu narración.
       NO preguntes entre tarjetas. Ignora swipes ahí (el cliente no los usa).
     — Entre pantallas / vistas (welcome→intro, analysis→detalle, detalle→recs, etc.):
       Si llega [pantalla:…] con SWIPE_CONTINUE_REQUEST: el cliente NO avanzó.
@@ -454,9 +444,7 @@ def on_enter_should_defer(state: dict) -> bool:
     phase = state.get("phase")
     # welcome:preparing — silent prewarm; welcome:ready — client sends cue on
     # voice enable (avoids racing on_enter with a parallel get_session_state).
-    if step == "welcome" and phase in ("preparing", "ready"):
-        return True
-    return False
+    return step == "attract" or (step == "welcome" and phase in ("preparing", "ready"))
 
 
 def build_on_enter_instructions(state: dict) -> str:
@@ -753,9 +741,7 @@ def _pantalla_dedupe_key(text: str) -> str:
 
 
 def _closing_pantalla_instructions(text: str) -> str | None:
-    if "closing:photo" in text or (
-        "step=closing" in text and "phase=pose" in text
-    ):
+    if "closing:photo" in text or ("step=closing" in text and "phase=pose" in text):
         return (
             "CLOSING PHOTO — get_session_state. "
             "UNA locución: huella → paquete (informe + tarjeta + foto) para su correo; "
@@ -776,9 +762,7 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Pregunta si envían el reporte ahora. "
             "PROHIBIDO repetir frases ya dichas en generating o photo."
         )
-    if "closing:thanks" in text or (
-        "step=closing" in text and "phase=thanks" in text
-    ):
+    if "closing:thanks" in text or ("step=closing" in text and "phase=thanks" in text):
         return (
             "CLOSING THANKS — get_session_state. "
             "Agradecimiento cálido + invita a escanear el QR de SETI. "
@@ -920,8 +904,7 @@ async def my_agent(ctx: JobContext):
                 return
 
             intro_orchestrator_start = (
-                "INTRO_ORCHESTRATOR_START" in event.text
-                or "intro:run" in event.text
+                "INTRO_ORCHESTRATOR_START" in event.text or "intro:run" in event.text
             )
             intro_continuous = (
                 "INTRO_CONTINUOUS_TOUR" in event.text
@@ -937,19 +920,11 @@ async def my_agent(ctx: JobContext):
                 or "step=detail" in event.text
                 or "focus=detail" in event.text
             )
-            welcome_ready = (
-                "[pantalla:welcome:ready]" in event.text
-                or (
-                    "phase=ready" in event.text
-                    and "welcome" in event.text
-                )
+            welcome_ready = "[pantalla:welcome:ready]" in event.text or (
+                "phase=ready" in event.text and "welcome" in event.text
             )
-            welcome_preparing = (
-                "[pantalla:welcome:preparing]" in event.text
-                or (
-                    "phase=preparing" in event.text
-                    and "welcome" in event.text
-                )
+            welcome_preparing = "[pantalla:welcome:preparing]" in event.text or (
+                "phase=preparing" in event.text and "welcome" in event.text
             )
             closing_instructions = _closing_pantalla_instructions(event.text)
 
@@ -963,9 +938,7 @@ async def my_agent(ctx: JobContext):
             if intro_orchestrator_start or intro_continuous:
                 agent_session.interrupt()
                 if schedule_intro_tour(agent_session):
-                    logger.info(
-                        "[text_input] intro orchestrator started from pantalla"
-                    )
+                    logger.info("[text_input] intro orchestrator started from pantalla")
                 else:
                     logger.info(
                         "[text_input] intro orchestrator already active — "
@@ -1011,17 +984,12 @@ async def my_agent(ctx: JobContext):
                     ),
                 )
             elif welcome_ready:
-                agent_session.generate_reply(
-                    instructions=(
-                        "WELCOME READY (Screen 4a) — ORDEN ESTRICTO: "
-                        "1) get_session_state. "
-                        "2) HABLA PRIMERO (~10-12 s): saluda con facts.name, rol y empresa; "
-                        "2-3 frases sobre Huella Digital e invita a «cómo funciona». "
-                        "PROHIBIDO present_content. PROHIBIDO navigate_journey mientras hablas. "
-                        "3) SOLO después de terminar el saludo: navigate_journey(start_experience). "
-                        "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
-                    ),
-                )
+                if schedule_welcome(agent_session):
+                    logger.info("[text_input] welcome orchestrator started")
+                else:
+                    logger.info(
+                        "[text_input] welcome orchestrator already active/completed"
+                    )
             elif closing_instructions:
                 once_key = dedupe_key
                 if _pantalla_already_narrated(once_key):
@@ -1059,8 +1027,20 @@ async def my_agent(ctx: JobContext):
                     return
                 # Scripted intro: kiosk mic is muted during director segments.
                 # Ignore ambient STT/backchannel so we do not interrupt Nova.
-                looks_like_question = "?" in transcript or transcript.lower().startswith(
-                    ("qué", "que ", "cómo", "como ", "por qué", "porque ", "cuándo", "cuando ")
+                looks_like_question = (
+                    "?" in transcript
+                    or transcript.lower().startswith(
+                        (
+                            "qué",
+                            "que ",
+                            "cómo",
+                            "como ",
+                            "por qué",
+                            "porque ",
+                            "cuándo",
+                            "cuando ",
+                        )
+                    )
                 )
                 if not looks_like_question and len(transcript) < 24:
                     logger.info(
@@ -1152,9 +1132,6 @@ async def my_agent(ctx: JobContext):
 
     replay_task = asyncio.create_task(_replay_queued_pantalla())
 
-    narration_barrier = NarrationBarrier()
-    set_session_narration_barrier(narration_barrier)
-
     room_opts = room_io.RoomOptions(
         # Kiosk browsers can briefly reconnect; keep the voice session alive.
         close_on_disconnect=False,
@@ -1188,17 +1165,6 @@ async def my_agent(ctx: JobContext):
     )
 
     await ctx.connect()
-
-    @ctx.room.local_participant.register_rpc_method("narration_segment_done")
-    async def _on_narration_segment_done(data) -> str:
-        try:
-            payload = json.loads(data.payload or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        segment_id = str(payload.get("segmentId") or "")
-        token = int(payload.get("token") or 0)
-        ok = narration_barrier.ack(segment_id, token)
-        return json.dumps({"ok": ok})
 
     await replay_task
 

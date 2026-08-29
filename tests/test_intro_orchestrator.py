@@ -4,9 +4,9 @@ from tasks.intro_orchestrator import _build_intro_steps
 def test_build_intro_steps_follows_storyboard_order() -> None:
     content = {
         "processSteps": [
-            {"index": 0, "voiceScript": "card0"},
-            {"index": 1, "transitionSpeak": "bridge1"},
-            {"index": 2, "transitionSpeak": "bridge2"},
+            {"index": 0, "title": "card0", "points": ["gesture", "voice"]},
+            {"index": 1, "title": "card1", "points": ["five dimensions"]},
+            {"index": 2, "title": "card2", "points": ["report"]},
         ],
         "dimensionConcepts": [
             {"id": "ssi", "index": 0, "explanation": "ssi line"},
@@ -34,3 +34,6 @@ def test_build_intro_steps_follows_storyboard_order() -> None:
     assert steps[2].dimension_id == "ssi"
     assert steps[4].index == 2
     assert steps[5].dimension_id == "card"
+    assert steps[0].anchors == ("card0", "gesture", "voice")
+    assert steps[1].anchors == ("card1",)
+    assert steps[1].fallback_speak == ""
