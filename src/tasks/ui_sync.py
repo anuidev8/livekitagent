@@ -154,15 +154,12 @@ async def speak_director_line(
     except Exception as exc:
         logger.warning("director_narration_arm failed segment=%s: %s", segment_id, exc)
 
-    handle = await generate_reply_safe(
+    await generate_reply_safe(
         session,
         instructions=instructions,
         allow_interruptions=False,
-        wait_for_playout=False,
+        wait_for_playout=wait_for_playout,
     )
-    barrier.open_ack()
-    if wait_for_playout:
-        await handle.wait_for_playout()
     await wait_for_agent_idle(session)
 
     if not wait_for_client_ack:
