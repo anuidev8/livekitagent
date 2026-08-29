@@ -705,7 +705,7 @@ def _build_nova_realtime() -> aws.realtime.RealtimeModel:
         turn_detection=NOVA_TURN_DETECTION,  # type: ignore[arg-type]
         region=AWS_REGION,
         tool_choice="auto",
-        generate_reply_timeout=30.0,
+        generate_reply_timeout=45.0,
         temperature=0.7,
         top_p=0.9,
         # Nova Sonic 2 defaults to mixed modalities (audio + text),
@@ -719,6 +719,10 @@ _USER_VOICE_MIN_CHARS = 4
 # Appended to every visitor voice turn so Nova maps intent → navigate_journey.
 _USER_VOICE_TOOL_HINT = (
     "Llama get_session_state primero. "
+    "Si step=welcome y phase=ready y el visitante confirma continuar "
+    "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
+    "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
+    "no re-narres las dimensiones ni repitas el saludo completo. "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
