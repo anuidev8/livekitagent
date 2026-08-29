@@ -53,9 +53,13 @@ def _ordered_rows(items: Any) -> list[dict[str, Any]]:
 
 
 def _spotlight_line(item: dict[str, Any]) -> str:
-    return str(
+    name = str(item.get("name") or item.get("dimensionName") or item.get("title") or "").strip()
+    concept = str(
         item.get("explanation") or item.get("concept") or item.get("copy") or ""
     ).strip()
+    if name and concept:
+        return f"{name}: {concept}"
+    return concept or name
 
 
 def _points_line(step: dict[str, Any]) -> str:
@@ -116,8 +120,11 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
             fallback_speak=_card_script(step0),
             pace="card",
             extra_instructions=(
-                "Cubre todos los puntos en facts.points sin omitir ninguno. "
-                "PROHIBIDO dimensiones, entregables o «empezamos el análisis»."
+                "BREVE y amable — 4 frases máximo. "
+                "Cubre: deslizar derecha avanza, doble izquierda sale, "
+                "en análisis deslizar cambia dimensión y pulgar arriba abre detalle, "
+                "toque o voz en cualquier momento. "
+                "PROHIBIDO dimensiones, entregables, «empezamos el análisis»."
             ),
         )
     )
@@ -129,7 +136,10 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
             index=1,
             fallback_speak=_transition_line(step1),
             pace="transition",
-            extra_instructions="Puente breve antes de los iconos de dimensiones.",
+            extra_instructions=(
+                "Frase MUY corta (~2 s): «Tu análisis mide cinco dimensiones de presencia digital» "
+                "o similar. PROHIBIDO listar las cinco aquí."
+            ),
         )
     )
 
@@ -144,7 +154,11 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
                 dimension_id=dim_id,
                 fallback_speak=_spotlight_line(concept),
                 pace="spotlight",
-                extra_instructions="Solo esta dimensión.",
+                extra_instructions=(
+                    "Di el nombre de esta dimensión seguido de UNA frase afirmativa "
+                    "que explique qué mide (~5 s). PROHIBIDO preguntas retóricas. "
+                    "Solo esta dimensión."
+                ),
             )
         )
 
