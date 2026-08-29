@@ -1148,17 +1148,6 @@ async def my_agent(ctx: JobContext):
     narration_barrier = NarrationBarrier()
     set_session_narration_barrier(narration_barrier)
 
-    @ctx.room.local_participant.register_rpc_method("narration_segment_done")
-    async def _on_narration_segment_done(data) -> str:
-        try:
-            payload = json.loads(data.payload or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        segment_id = str(payload.get("segmentId") or "")
-        token = int(payload.get("token") or 0)
-        ok = narration_barrier.ack(segment_id, token)
-        return json.dumps({"ok": ok})
-
     room_opts = room_io.RoomOptions(
         # Kiosk browsers can briefly reconnect; keep the voice session alive.
         close_on_disconnect=False,
@@ -1192,6 +1181,17 @@ async def my_agent(ctx: JobContext):
     )
 
     await ctx.connect()
+
+    @ctx.room.local_participant.register_rpc_method("narration_segment_done")
+    async def _on_narration_segment_done(data) -> str:
+        try:
+            payload = json.loads(data.payload or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        segment_id = str(payload.get("segmentId") or "")
+        token = int(payload.get("token") or 0)
+        ok = narration_barrier.ack(segment_id, token)
+        return json.dumps({"ok": ok})
 
     await replay_task
 
