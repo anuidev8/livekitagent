@@ -76,10 +76,6 @@ def _card_script(step: dict[str, Any]) -> str:
     return _points_line(step)
 
 
-def _transition_line(step: dict[str, Any]) -> str:
-    return str(step.get("transitionSpeak") or step.get("title") or "").strip()
-
-
 async def _still_on_intro() -> bool:
     try:
         raw = await rpc("get_session_state")
@@ -105,15 +101,58 @@ async def _load_content() -> dict[str, Any]:
     return content if isinstance(content, dict) else {}
 
 
+def _dimensions_script(dimensions: list[dict[str, Any]]) -> str:
+    """One continuous narration covering all 5 dimension spotlights."""
+    lines = []
+    for concept in dimensions:
+        line = _spotlight_line(concept)
+        if line:
+            lines.append(line)
+    return ". ".join(lines)
+
+
+def _deliverables_script(deliverables: list[dict[str, Any]]) -> str:
+    """One continuous narration covering all 3 deliverables."""
+    lines = []
+    for item in deliverables:
+        line = _spotlight_line(item)
+        if line:
+            lines.append(line)
+    return ". ".join(lines)
+
+
 def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
+    """Build exactly 3 card-level steps — one voice block per card.
+
+    Card 0: gestures/interaction  (intro_step index=0)
+    Card 1: all 5 dimensions      (intro_step index=1, voice covers all at once)
+    Card 2: all 3 deliverables    (intro_step index=2, voice covers all at once)
+
+    Sub-item spotlights (intro_card_dimension / intro_deliverable) are driven
+    client-side from the live transcript via introTourTranscriptSync — not via
+    individual orchestrator steps.  This avoids the premature-ack problem where
+    a brief inter-chunk silence from Nova was incorrectly interpreted as the
+    narration ending, causing the UI card to advance before the voice finished.
+    """
     steps_rows = _ordered_rows(content.get("processSteps"))
     dimensions = _ordered_rows(content.get("dimensionConcepts"))
     deliverables = _ordered_rows(content.get("deliverableConcepts"))
 
-    steps: list[PresentStep] = []
-
     step0 = steps_rows[0] if steps_rows else {}
-    steps.append(
+    step1 = steps_rows[1] if len(steps_rows) > 1 else {}
+    step2 = steps_rows[2] if len(steps_rows) > 2 else {}
+
+    dim_names = [
+        str(c.get("title") or c.get("name") or "")
+        for c in dimensions
+        if c.get("title") or c.get("name")
+    ]
+    dim_fallback = _dimensions_script(dimensions) or _card_script(step1)
+
+    del_fallback = _deliverables_script(deliverables) or _card_script(step2)
+
+    return [
+        # ── Card 0: Cómo interactuar ─────────────────────────────────────────
         PresentStep(
             target="intro_step",
             index=0,
@@ -126,68 +165,43 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
                 "toque o voz en cualquier momento. "
                 "PROHIBIDO dimensiones, entregables, «empezamos el análisis»."
             ),
-        )
-    )
-
-    step1 = steps_rows[1] if len(steps_rows) > 1 else {}
-    steps.append(
+        ),
+        # ── Card 1: Las 5 dimensiones ────────────────────────────────────────
+        # Voice narrates ALL five in one continuous block.  The client drives
+        # each dimension-icon spotlight from the live transcript keywords, so
+        # the UI animation stays in sync without needing individual ack steps.
         PresentStep(
             target="intro_step",
             index=1,
-            fallback_speak=_transition_line(step1),
-            pace="transition",
+            fallback_speak=dim_fallback,
+            pace="card",
             extra_instructions=(
-                "Frase MUY corta (~2 s): «Tu análisis mide cinco dimensiones de presencia digital» "
-                "o similar. PROHIBIDO listar las cinco aquí."
+                "Frase de apertura MUY corta (~2 s) — p.ej. «Tu análisis mide cinco "
+                "dimensiones de presencia digital» — luego narra CADA dimensión "
+                "en este orden exacto: "
+                + ", ".join(dim_names)
+                + ". Para cada una di su nombre seguido de UNA frase que explique qué mide. "
+                "Di los nombres TAL CUAL (incluye «Índice de Venta Social» completo). "
+                "Flujo continuo sin pausas largas entre dimensiones. "
+                "PROHIBIDO listar con números ni guiones. PROHIBIDO preguntas retóricas."
             ),
-        )
-    )
-
-    for concept in dimensions:
-        dim_id = str(concept.get("id") or "").strip()
-        if not dim_id:
-            continue
-        steps.append(
-            PresentStep(
-                target="intro_card_dimension",
-                index=-1,
-                dimension_id=dim_id,
-                fallback_speak=_spotlight_line(concept),
-                pace="spotlight",
-                extra_instructions=(
-                    "Di el nombre de esta dimensión seguido de UNA frase afirmativa "
-                    "que explique qué mide (~5 s). PROHIBIDO preguntas retóricas. "
-                    "Solo esta dimensión."
-                ),
-            )
-        )
-
-    step2 = steps_rows[2] if len(steps_rows) > 2 else {}
-    steps.append(
+        ),
+        # ── Card 2: Qué recibirás ────────────────────────────────────────────
+        # Same approach: one block covers all 3 deliverables; client spotlights
+        # each icon from transcript keywords (radar / informe / correo).
         PresentStep(
             target="intro_step",
             index=2,
-            fallback_speak=_transition_line(step2),
-            pace="transition",
-            extra_instructions="Puente breve antes de los entregables.",
-        )
-    )
-
-    for item in deliverables:
-        del_id = str(item.get("id") or "").strip()
-        idx = int(item.get("index", 0))
-        steps.append(
-            PresentStep(
-                target="intro_deliverable",
-                index=idx,
-                dimension_id=del_id,
-                fallback_speak=_spotlight_line(item),
-                pace="spotlight",
-                extra_instructions="Solo este entregable.",
-            )
-        )
-
-    return steps
+            fallback_speak=del_fallback,
+            pace="card",
+            extra_instructions=(
+                "Frase de apertura breve (~2 s) — p.ej. «Al terminar recibirás tres cosas» "
+                "— luego narra CADA entregable en orden: Radar, Informe, Correo. "
+                "Para cada uno di su nombre y UNA frase de valor. "
+                "Flujo continuo. PROHIBIDO preguntas retóricas."
+            ),
+        ),
+    ]
 
 
 async def _run_intro_tour(session: AgentSession, token: int) -> None:

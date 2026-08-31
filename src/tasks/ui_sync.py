@@ -88,9 +88,11 @@ def _facts_points(data: dict[str, Any]) -> list[str]:
     return [str(p).strip() for p in points if str(p).strip()]
 
 
-def _paint_delay_ms(target: str) -> int:
+def _paint_delay_ms(target: str, index: int = 0) -> int:
     if target == "intro_step":
-        return 450
+        # Cards 1 and 2 have animated sub-elements (dimension icons, deliverable
+        # icons) that need a moment to render before voice starts.
+        return 600 if index >= 1 else 450
     if target in ("intro_card_dimension", "intro_deliverable"):
         return 320
     return 180
@@ -104,11 +106,20 @@ def _pace_instructions(
 ) -> str:
     if pace == "card":
         anchor = spoken or "; ".join(points)
+        # When extra_instructions provide detailed per-card guidance (multi-item
+        # narration for dimensions / deliverables cards), let them lead and use
+        # the anchor only as a factual reference, not as a verbatim constraint.
+        if extra:
+            return (
+                "El foco YA está en pantalla. No uses herramientas. "
+                f"Referencia de contenido (no leer literal): «{anchor}». "
+                f"Sigue estas instrucciones: {extra} "
+                "Tono cálido. Para al terminar."
+            ).strip()
         return (
             "El foco YA está en pantalla. No uses herramientas. "
             f"Di este guion en español, sin añadir ideas nuevas ni repetir pantallas anteriores: "
-            f"«{anchor}». Tono cálido. Para al terminar. "
-            f"{extra}"
+            f"«{anchor}». Tono cálido. Para al terminar."
         ).strip()
     if pace == "transition":
         return (
@@ -246,7 +257,7 @@ async def present_and_speak(
         logger.warning("director step skipped speak (present failed): %s", label)
         return data
 
-    await asyncio.sleep(_paint_delay_ms(target) / 1000)
+    await asyncio.sleep(_paint_delay_ms(target, index) / 1000)
     spoken = (
         str(data.get("spokenContent") or data.get("narration") or "").strip()
         or fallback_speak
