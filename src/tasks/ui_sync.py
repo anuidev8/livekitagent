@@ -158,6 +158,12 @@ async def speak_director_line(
     session.interrupt()
     await wait_for_agent_idle(session)
 
+    # Nova Sonic uses server-side turn detection and ignores allow_interruptions=False.
+    # After interrupt() + wait_for_idle(), the server-side VAD still needs a moment to
+    # settle before a new generate_reply fires — otherwise the first audio chunk gets
+    # clipped by the server's own reset event.  400 ms is enough.
+    await asyncio.sleep(0.4)
+
     barrier = get_session_narration_barrier()
     token = barrier.arm(segment_id)
     try:
