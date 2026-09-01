@@ -1065,7 +1065,12 @@ async def my_agent(ctx: JobContext):
                 )
                 return
 
-            if not detail_auto and not welcome_preparing:
+            # closing pantalla cues arrive immediately after a navigate_journey call
+            # (e.g. send_report → photo_consent). The agent is likely still speaking
+            # the previous confirmation. Do NOT interrupt — let it finish, then the
+            # generate_reply below will queue the photo-consent question naturally.
+            is_closing_cue = closing_instructions is not None
+            if not detail_auto and not welcome_preparing and not is_closing_cue:
                 agent_session.interrupt()
 
             if detail_revisit:
