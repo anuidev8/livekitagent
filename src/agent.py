@@ -300,6 +300,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: repetir las 3 tarjetas de onboarding aquí.
+    PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en las tarjetas del intro.
 
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
@@ -318,6 +319,18 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     OBLIGATORIO present_content por icono — la UI resalta solo cuando llamas la tool.
     Solo start_analysis tras confirmación en card 2.
     NO pases al carrusel spider (intro_dimension).
+
+    RE-EXPLICAR UNA TARJETA (a petición explícita del visitante):
+    Si el visitante pide escuchar otra vez una tarjeta («explícame de nuevo»,
+    «repite las dimensiones», «¿y los gestos?», «¿qué recibo?», etc.):
+      1) NO digas que no puedes — sí puedes.
+      2) Llama navigate_journey(replay_intro_card, index=N)
+         donde N = 0 (gestos), 1 (dimensiones), 2 (entregables).
+      3) Narra esa tarjeta con más detalle que en el tour automático si el
+         visitante pide profundidad; si solo pide repetir, sé igual de breve.
+      4) Tras narrar, pregunta «¿Seguimos al análisis?» y PARA.
+    PROHIBIDO replay_intro_card sin petición explícita del visitante.
+    PROHIBIDO cancel_intro_tour cuando el visitante pide re-explicación.
 
     ────────────────────────────────────────────────
     ANALYSIS SCANNING → COMPLETE → RESULTS (mismo globo)
@@ -592,16 +605,19 @@ class Assistant(Agent):
 
     @function_tool
     async def navigate_journey(
-        self, context: RunContext, action: str, dimension_id: str = ""
+        self, context: RunContext, action: str, dimension_id: str = "", index: int = -1
     ) -> str:
-        """Ejecuta una acción disponible en la experiencia. En analysis:complete
-        usa open_detail (+ dimension_id) para abrir detalle de dimensión; advance
-        no está disponible ahí. En closing:pose|capture usa ready_for_picture cuando
-        el visitante confirma la foto. En closing:thanks usa finish cuando confirma salir."""
-        return await rpc(
-            "navigate_journey",
-            {"action": action, "dimensionId": dimension_id},
-        )
+        """Ejecuta una acción disponible en la experiencia.
+        - open_detail + dimension_id: abre detalle de dimensión en analysis:complete.
+        - ready_for_picture: en closing:pose|capture cuando el visitante confirma la foto.
+        - finish: en closing:thanks cuando confirma salir.
+        - replay_intro_card + index (0=gestos, 1=dimensiones, 2=entregables):
+          vuelve a narrar esa tarjeta cuando el visitante lo pide explícitamente.
+          Solo disponible mientras step=intro."""
+        payload: dict = {"action": action, "dimensionId": dimension_id}
+        if index >= 0:
+            payload["index"] = index
+        return await rpc("navigate_journey", payload)
 
     @function_tool
     async def fill_search(self, context: RunContext, query: str) -> str:
@@ -723,6 +739,10 @@ _USER_VOICE_TOOL_HINT = (
     "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
+    "Si step=intro y el visitante pide re-explicar una tarjeta "
+    "(«repite», «otra vez», «explícame de nuevo», «¿y los gestos?», «¿qué recibo?», «las dimensiones»): "
+    "navigate_journey(replay_intro_card, index=N) donde N=0 gestos, N=1 dimensiones, N=2 entregables. "
+    "Luego narra esa tarjeta con profundidad si pide detalle, o breve si solo repite. "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
@@ -1021,6 +1041,7 @@ async def my_agent(ctx: JobContext):
                         "1) get_session_state. "
                         "2) HABLA PRIMERO (~10-12 s): saluda con facts.name, rol y empresa; "
                         "2-3 frases sobre Huella Digital e invita a «cómo funciona». "
+                        "PROHIBIDO listar las 5 dimensiones aquí — se explicarán en las tarjetas del intro. "
                         "PROHIBIDO present_content. PROHIBIDO navigate_journey mientras hablas. "
                         "3) SOLO después de terminar el saludo: navigate_journey(start_experience). "
                         "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
@@ -1066,9 +1087,10 @@ async def my_agent(ctx: JobContext):
                     user_input=event.text,
                     instructions=(
                         "INTRO TOUR ACTIVE — el orchestrator Python narra las tarjetas. "
-                        "Responde SOLO si el visitante hizo una pregunta directa (≤2 frases). "
-                        "PROHIBIDO present_content, navigate_journey(advance/start_experience) "
-                        "y PROHIBIDO re-narrar gestos, dimensiones o entregables. "
+                        "Si el visitante hace una pregunta directa: responde en ≤2 frases. "
+                        "Si pide re-explicar una tarjeta: llama navigate_journey(replay_intro_card, index=N) "
+                        "y narra esa tarjeta con más detalle (N=0 gestos, N=1 dimensiones, N=2 entregables). "
+                        "PROHIBIDO present_content y navigate_journey(advance/start_experience). "
                         f"{_USER_VOICE_TOOL_HINT}"
                     ),
                 )

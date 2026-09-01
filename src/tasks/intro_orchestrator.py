@@ -167,23 +167,29 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
             ),
         ),
         # ── Card 1: Las 5 dimensiones ────────────────────────────────────────
-        # Voice narrates ALL five in one continuous block.  The client drives
-        # each dimension-icon spotlight from the live transcript keywords, so
-        # the UI animation stays in sync without needing individual ack steps.
+        # Voice is short (~12-15 s): name + one-sentence hook from the dynamic
+        # dimensionConcepts data.  Deep explanations available via replay_intro_card.
+        # Build a compact per-dimension line from the live content so no text is
+        # hardcoded — each dimension contributes its title + explanation.
+        dim_lines = [
+            f"{c.get('title') or c.get('name') or ''}: {str(c.get('explanation') or c.get('copy') or '').split('.')[0]}"
+            for c in _ordered_rows(content.get("dimensionConcepts"))
+            if c.get("title") or c.get("name")
+        ]
         PresentStep(
             target="intro_step",
             index=1,
             fallback_speak=dim_fallback,
             pace="card",
             extra_instructions=(
-                "Frase de apertura MUY corta (~2 s) — p.ej. «Tu análisis mide cinco "
-                "dimensiones de presencia digital» — luego narra CADA dimensión "
+                "BREVE — máximo 15 segundos en total. "
+                "Frase de apertura: «Cinco dimensiones de presencia digital:» "
+                "— luego di CADA nombre seguido de UNA frase corta de qué mide, "
                 "en este orden exacto: "
-                + ", ".join(dim_names)
-                + ". Para cada una di su nombre seguido de UNA frase que explique qué mide. "
-                "Di los nombres TAL CUAL (incluye «Índice de Venta Social» completo). "
-                "Flujo continuo sin pausas largas entre dimensiones. "
-                "PROHIBIDO listar con números ni guiones. PROHIBIDO preguntas retóricas."
+                + "; ".join(dim_lines)
+                + ". Flujo continuo sin pausas largas. "
+                "PROHIBIDO explicaciones largas, preguntas retóricas ni frases de cierre extra. "
+                "PROHIBIDO listar con números ni guiones."
             ),
         ),
         # ── Card 2: Qué recibirás ────────────────────────────────────────────
