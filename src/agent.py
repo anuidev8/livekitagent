@@ -289,8 +289,13 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     Screen 4a — WELCOME READY (si encontrado)
     ────────────────────────────────────────────────
-    Saludo CORTO (~10-12 s), no monólogo largo.
-    PASO 1 — SOLO habla: saluda con nombre + rol/empresa. 2-3 oraciones:
+    Llama get_session_state PRIMERO — los datos reales del visitante están en facts.name,
+    facts.role y facts.company. Úsalos para componer TU PROPIO saludo en español natural.
+    PROHIBIDO ABSOLUTO: pronunciar en voz alta texto entre corchetes como [nombre], [rol],
+    [empresa] u otros placeholders — son variables internas que JAMÁS se dicen.
+    PROHIBIDO meta-comentarios antes del saludo: «vamos a proceder», «procederé con»,
+    «realizaré el saludo», «entendido». Entra directo al contenido.
+    PASO 1 — SOLO habla: saluda con el nombre real + rol/empresa reales. 2-3 oraciones:
        qué es Huella Digital y que explorarán su presencia. Termina con
        una invitación («¿Vemos cómo funciona?» o similar) y PARA.
        PROHIBIDO llamar navigate_journey mientras hablas en este paso.
@@ -1127,16 +1132,19 @@ async def my_agent(ctx: JobContext):
             elif welcome_ready:
                 agent_session.generate_reply(
                     instructions=(
-                        "WELCOME READY (Screen 4a) — DOS PASOS SEPARADOS: "
-                        "PASO 1 — llama get_session_state, luego HABLA SOLO (~10-12 s): "
-                        "saluda con facts.name, rol y empresa; 2-3 frases sobre Huella Digital "
-                        "e invita a «cómo funciona». PARA y espera respuesta. "
-                        "PROHIBIDO listar las 5 dimensiones aquí. "
+                        "WELCOME READY — PASO 1: "
+                        "Llama get_session_state AHORA MISMO antes de hablar. "
+                        "Usa facts.name, facts.role y facts.company del resultado para componer "
+                        "UN saludo propio en español natural (~10-12 s). "
+                        "PROHIBIDO ABSOLUTO: leer en voz alta texto entre corchetes como [nombre], "
+                        "[rol], [empresa] o cualquier otro placeholder — son variables internas, NUNCA se dicen. "
+                        "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
+                        "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
                         "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
-                        "PASO 2 — cuando el visitante confirme (sí / continuar / adelante / etc.) "
-                        "O tras una pausa natural: llama navigate_journey(start_experience) en ese turno. "
-                        "Nunca en el mismo turno que el saludo. "
-                        "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
+                        "PARA y espera confirmación del visitante. "
+                        "PASO 2 — solo cuando confirme (sí / continuar / adelante / vamos / dale): "
+                        "llama navigate_journey(start_experience) en ese turno — nunca junto al saludo. "
+                        "Tras ok: SILENCIO TOTAL — no repitas el saludo; espera [pantalla:intro]."
                     ),
                 )
             elif closing_instructions:

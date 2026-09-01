@@ -50,9 +50,10 @@ def _token_valid(token: int) -> bool:
 
 async def _run_intro_tour(session: AgentSession, token: int) -> None:
     logger.info("intro orchestrator start token=%s", token)
-    session.interrupt()
+    # Do NOT interrupt here — the agent may still be delivering the post-navigate
+    # confirmation. Let it finish; VAD settle sleep below is enough buffer.
     try:
-        # Let VAD settle after interrupt before speaking.
+        # Let VAD settle before speaking.
         await asyncio.sleep(1.0)
 
         if not _token_valid(token):
