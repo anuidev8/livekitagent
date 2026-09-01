@@ -232,7 +232,7 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 segment_id="intro_tour:warmup",
                 instructions=(
                     "Di EXACTAMENTE esta frase, sin añadir nada antes ni después: "
-                    "«Empezamos.» — una sola palabra, pausa natural. PARA de inmediato."
+                    "«Bien, empezamos.» — dos palabras, pausa natural al final. PARA de inmediato."
                 ),
                 wait_for_playout=True,
                 wait_for_client_ack=False,

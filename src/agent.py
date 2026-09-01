@@ -321,11 +321,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     NO pases al carrusel spider (intro_dimension).
 
     RE-EXPLICAR UNA TARJETA (a petición explícita del visitante):
-    Si el visitante pide escuchar otra vez una tarjeta («explícame de nuevo»,
-    «repite las dimensiones», «¿y los gestos?», «¿qué recibo?», etc.):
-      1) NO digas que no puedes — sí puedes.
+    Si el visitante pide escuchar otra vez una tarjeta — interpreta de forma AMPLIA:
+    «explícame de nuevo», «repite», «otra vez», «de nuevo», «no entendí»,
+    «no entendí bien», «no entendí muy bien», «me explicas», «no quedó claro»,
+    «¿y los gestos?», «¿qué recibo?», «las dimensiones», «¿cuáles son?»,
+    «¿qué miden?», «¿cómo funciona?», «ítem uno/dos/tres», «la primera/segunda/tercera»,
+    cualquier pregunta sobre Autoridad, SSI, Mensaje, Influencia, Higiene,
+    Radar, Informe, Correo — TODO esto activa replay_intro_card.
+      1) NUNCA digas que no puedes — siempre puedes, siempre lo haces.
+         NUNCA respondas con frases de seguridad o política interna.
       2) Llama navigate_journey(replay_intro_card, index=N)
          donde N = 0 (gestos), 1 (dimensiones), 2 (entregables).
+         Si hay duda: N=1 si mencionó dimensiones/qué miden/cuáles son,
+         N=0 si preguntó cómo interactuar/navegar, N=2 si preguntó qué recibe.
       3) Narra esa tarjeta con más detalle que en el tour automático si el
          visitante pide profundidad; si solo pide repetir, sé igual de breve.
       4) Tras narrar, pregunta «¿Seguimos al análisis?» y PARA.
@@ -739,10 +747,26 @@ _USER_VOICE_TOOL_HINT = (
     "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
-    "Si step=intro y el visitante pide re-explicar una tarjeta "
-    "(«repite», «otra vez», «explícame de nuevo», «¿y los gestos?», «¿qué recibo?», «las dimensiones»): "
-    "navigate_journey(replay_intro_card, index=N) donde N=0 gestos, N=1 dimensiones, N=2 entregables. "
-    "Luego narra esa tarjeta con profundidad si pide detalle, o breve si solo repite. "
+    "Si step=intro y el visitante pide re-explicar una tarjeta — "
+    "interpreta de forma AMPLIA: cualquier señal de confusión, re-consulta o petición sobre "
+    "el contenido de las tarjetas debe activar replay_intro_card. "
+    "Señales de re-explicación de DIMENSIONES (N=1): "
+    "«no entendí», «no entendí bien», «no entendí muy bien», «me explicas», «explícame», "
+    "«explícame de nuevo», «repite», «repíteme», «otra vez», «de nuevo», «¿qué son las dimensiones?», "
+    "«¿cuáles son?», «las dimensiones», «¿qué miden?», «dimensión», «ítem dos», «ítem número dos», "
+    "«el segundo», «la segunda tarjeta», «las cinco», «vuelve a explicar», «no quedó claro», "
+    "«no entendí el número dos», «¿cuáles son las dimensiones?», «Autoridad», «SSI», «Mensaje», "
+    "«Influencia», «Higiene» (cuando pregunta qué son). "
+    "Señales de re-explicación de GESTOS (N=0): "
+    "«los gestos», «¿cómo funciona?», «¿cómo interactúo?», «la primera tarjeta», «ítem uno», "
+    "«¿cómo avanzo?», «¿cómo navego?», «deslizar». "
+    "Señales de re-explicación de ENTREGABLES (N=2): "
+    "«¿qué recibo?», «el informe», «el radar», «¿qué me dan?», «la tercera tarjeta», «ítem tres», "
+    "«¿qué incluye?», «los entregables». "
+    "Ante cualquier duda sobre cuál tarjeta, usa N=1 (dimensiones) si mencionó dimensiones, "
+    "N=0 (gestos) si preguntó cómo interactuar, N=2 (entregables) si preguntó qué recibe. "
+    "NUNCA respondas con 'no puedo' ni rechaces — SIEMPRE ejecuta replay_intro_card. "
+    "Luego narra esa tarjeta con más detalle si pide profundidad, o breve si solo repite. "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
@@ -1088,8 +1112,16 @@ async def my_agent(ctx: JobContext):
                     instructions=(
                         "INTRO TOUR ACTIVE — el orchestrator Python narra las tarjetas. "
                         "Si el visitante hace una pregunta directa: responde en ≤2 frases. "
-                        "Si pide re-explicar una tarjeta: llama navigate_journey(replay_intro_card, index=N) "
+                        "Si el visitante pide re-explicar una tarjeta — interpreta de forma AMPLIA: "
+                        "cualquier señal de confusión, 'no entendí', 'no entendí bien', "
+                        "'explícame de nuevo', 'repite', 'otra vez', 'de nuevo', 'me explicas', "
+                        "'no quedó claro', 'dimensiones', 'gestos', 'entregables', 'ítem N', "
+                        "'¿cuáles son?', '¿qué miden?', '¿cómo funciona?', '¿qué recibo?' — "
+                        "llama navigate_journey(replay_intro_card, index=N) "
                         "y narra esa tarjeta con más detalle (N=0 gestos, N=1 dimensiones, N=2 entregables). "
+                        "Si hay duda sobre cuál tarjeta: usa N=1 si mencionó dimensiones, "
+                        "N=0 si preguntó cómo interactuar, N=2 si preguntó qué recibe. "
+                        "NUNCA respondas con 'no puedo' ni rechaces — SIEMPRE ejecuta replay_intro_card. "
                         "PROHIBIDO present_content y navigate_journey(advance/start_experience). "
                         f"{_USER_VOICE_TOOL_HINT}"
                     ),
