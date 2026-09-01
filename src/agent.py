@@ -289,13 +289,14 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Screen 4a — WELCOME READY (si encontrado)
     ────────────────────────────────────────────────
     Saludo CORTO (~10-12 s), no monólogo largo.
-    ORDEN:
-    A) Saluda con nombre + rol/empresa. 2-3 oraciones: qué es Huella Digital
-       y que explorarán su presencia. Invita a «cómo funciona».
-    B) Llama navigate_journey(start_experience).
-    Si el visitante dice continuar / adelante / seguimos / listo / empezamos
-    EN CUALQUIER MOMENTO: cierra en una frase y llama start_experience — NO
-    fuerces el monólogo completo.
+    PASO 1 — SOLO habla: saluda con nombre + rol/empresa. 2-3 oraciones:
+       qué es Huella Digital y que explorarán su presencia. Termina con
+       una invitación («¿Vemos cómo funciona?» o similar) y PARA.
+       PROHIBIDO llamar navigate_journey mientras hablas en este paso.
+    PASO 2 — Después de que el visitante responda (continuar / adelante /
+       seguimos / listo / empezamos / sí) O después de una pausa natural
+       si no dice nada: llama navigate_journey(start_experience) en ese
+       momento — NO en el mismo turno que el saludo.
     Tras start_experience ok: SILENCIO TOTAL. PROHIBIDO repetir nombre/rol/
     empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
     PROHIBIDO: present_content en welcome:ready.
@@ -1113,13 +1114,15 @@ async def my_agent(ctx: JobContext):
             elif welcome_ready:
                 agent_session.generate_reply(
                     instructions=(
-                        "WELCOME READY (Screen 4a) — ORDEN ESTRICTO: "
-                        "1) get_session_state. "
-                        "2) HABLA PRIMERO (~10-12 s): saluda con facts.name, rol y empresa; "
-                        "2-3 frases sobre Huella Digital e invita a «cómo funciona». "
-                        "PROHIBIDO listar las 5 dimensiones aquí — se explicarán en las tarjetas del intro. "
-                        "PROHIBIDO present_content. PROHIBIDO navigate_journey mientras hablas. "
-                        "3) SOLO después de terminar el saludo: navigate_journey(start_experience). "
+                        "WELCOME READY (Screen 4a) — DOS PASOS SEPARADOS: "
+                        "PASO 1 — llama get_session_state, luego HABLA SOLO (~10-12 s): "
+                        "saluda con facts.name, rol y empresa; 2-3 frases sobre Huella Digital "
+                        "e invita a «cómo funciona». PARA y espera respuesta. "
+                        "PROHIBIDO listar las 5 dimensiones aquí. "
+                        "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
+                        "PASO 2 — cuando el visitante confirme (sí / continuar / adelante / etc.) "
+                        "O tras una pausa natural: llama navigate_journey(start_experience) en ese turno. "
+                        "Nunca en el mismo turno que el saludo. "
                         "Tras start_experience ok: SILENCIO — no repitas nombre; espera [pantalla:intro]."
                     ),
                 )
