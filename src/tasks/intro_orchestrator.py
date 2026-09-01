@@ -218,40 +218,20 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         if not await _step_ok(token):
             return
 
-        # Start content loading immediately — it takes ~1-2 s over RPC, so
-        # running it concurrently with the VAD settle costs nothing.
+        # Start content loading immediately — RPC takes ~1-2 s so run it
+        # concurrently with the VAD settle sleep below.
         content_task = asyncio.create_task(_load_content())
 
         # Nova Sonic's server-side VAD needs 50–600 ms to settle after
-        # session.interrupt(). Firing speak_director_line with skip_interrupt=True
-        # (no settle) before that window closes causes Nova's own reset event to
-        # clip the warmup mid-word (observed: "Bien," instead of "Bien, empezamos.").
-        # 1.2 s puts us past the worst-case reset window.
+        # session.interrupt(). Without this wait, the first card narration
+        # gets clipped by the server's own reset event.
         await asyncio.sleep(1.2)
 
         if not await _step_ok(token):
             content_task.cancel()
             return
 
-        # Warm-up beat: claim the voice channel so the LLM cannot auto-fire its
-        # own reply (triggered by reply_required=true from get_session_state)
-        # before the orchestrator takes control.  VAD has now settled, so
-        # skip_interrupt=True is safe and avoids a redundant 1.2 s penalty.
-        warmup_task = asyncio.create_task(
-            speak_director_line(
-                session,
-                segment_id="intro_tour:warmup",
-                instructions=(
-                    "Di EXACTAMENTE esta frase, sin añadir nada antes ni después: "
-                    "«Bien, empezamos.» — dos palabras, pausa natural al final. PARA de inmediato."
-                ),
-                wait_for_playout=True,
-                wait_for_client_ack=False,
-                skip_interrupt=True,
-            )
-        )
-        await asyncio.gather(warmup_task, content_task)
-        content = content_task.result()
+        content = await content_task
 
         if not await _step_ok(token):
             return
