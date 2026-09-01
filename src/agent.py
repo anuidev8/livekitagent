@@ -408,9 +408,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Espera su elección.
 
     CIERRE / FOTO / TARJETA:
-    - photo: UNA locución — huella digital → paquete (informe + tarjeta + foto)
-      para su correo; la foto es la imagen de la tarjeta. Invita al recuadro.
-      Cuando el visitante confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
+    - photo_consent (NUEVA fase): UNA pregunta natural — «¿Quieres tomarte
+      una foto para tu tarjeta? Será la portada visual de tu informe.»
+      Dos caminos:
+        • El visitante dice sí / quiero / adelante →
+            navigate_journey(ready_for_picture)  [genera la tarjeta con foto]
+        • El visitante dice no / omitir / sin foto →
+            navigate_journey(skip_photo)  [pasa directo a thanks — sin tarjeta]
+      PROHIBIDO avanzar sin respuesta. PROHIBIDO preguntar dos veces.
+      Si el visitante no responde o la voz no funciona, los botones
+      en pantalla están disponibles («Sí, con foto» / «Continuar sin foto»).
+    - pose: UNA locución — invita al visitante a colocarse frente al espejo.
+      Cuando confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
+      Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
     - generating: locución CORTA — componiendo entrega para su correo.
       PROHIBIDO pedir tomar foto — la captura ya ocurrió.
     - delivered: revisar tarjeta; informe e imagen van juntos a su correo;
@@ -619,7 +629,8 @@ class Assistant(Agent):
     ) -> str:
         """Ejecuta una acción disponible en la experiencia.
         - open_detail + dimension_id: abre detalle de dimensión en analysis:complete.
-        - ready_for_picture: en closing:pose|capture cuando el visitante confirma la foto.
+        - ready_for_picture: en closing:photo_consent o closing:pose|capture cuando el visitante confirma la foto.
+        - skip_photo: en closing:photo_consent cuando el visitante quiere omitir la foto.
         - finish: en closing:thanks cuando confirma salir.
         - replay_intro_card + index (0=gestos, 1=dimensiones, 2=entregables):
           vuelve a narrar esa tarjeta cuando el visitante lo pide explícitamente.
@@ -769,6 +780,10 @@ _USER_VOICE_TOOL_HINT = (
     "N=0 (gestos) si preguntó cómo interactuar, N=2 (entregables) si preguntó qué recibe. "
     "NUNCA respondas con 'no puedo' ni rechaces — SIEMPRE ejecuta replay_intro_card. "
     "Luego narra esa tarjeta con más detalle si pide profundidad, o breve si solo repite. "
+    "Si step=closing y phase=photo_consent y el visitante dice sí / quiero foto / con foto: "
+    "navigate_journey(ready_for_picture) de inmediato. "
+    "Si step=closing y phase=photo_consent y el visitante dice no / sin foto / omitir / skip: "
+    "navigate_journey(skip_photo) de inmediato — pasa directo a la pantalla de cierre (thanks). "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
@@ -782,6 +797,10 @@ _USER_VOICE_TOOL_HINT = (
 def _pantalla_dedupe_key(text: str) -> str:
     if "intro:run" in text or "INTRO_ORCHESTRATOR" in text:
         return "intro:run"
+    if "closing:photo_consent" in text or (
+        "step=closing" in text and "phase=photo_consent" in text
+    ):
+        return "closing:photo_consent"
     if "closing:photo" in text:
         return "closing:photo"
     if "closing:generating" in text:
@@ -803,14 +822,26 @@ def _pantalla_dedupe_key(text: str) -> str:
 
 
 def _closing_pantalla_instructions(text: str) -> str | None:
+    if "closing:photo_consent" in text or (
+        "step=closing" in text and "phase=photo_consent" in text
+    ):
+        return (
+            "CLOSING PHOTO CONSENT — get_session_state. "
+            "Pregunta en UNA frase natural si el visitante desea tomarse una foto para su tarjeta "
+            "(la foto será la portada visual del informe). "
+            "Dos caminos: sí / quiero / adelante → navigate_journey(ready_for_picture) [genera tarjeta con foto]; "
+            "no / omitir / sin foto → navigate_journey(skip_photo) [pasa directo a la pantalla de cierre]. "
+            "ESPERA su respuesta. PROHIBIDO avanzar sin confirmación. "
+            "Si los botones en pantalla ya respondieron, no preguntes de nuevo."
+        )
     if "closing:photo" in text or (
         "step=closing" in text and "phase=pose" in text
     ):
         return (
-            "CLOSING PHOTO — get_session_state. "
-            "UNA locución: huella → paquete (informe + tarjeta + foto) para su correo; "
-            "invita al recuadro. Si confirman estar listos: navigate_journey(ready_for_picture). "
-            "PROHIBIDO repetir si ya narraste la foto en este phase."
+            "CLOSING PHOTO POSE — get_session_state. "
+            "UNA locución: invita al visitante a colocarse frente al espejo para la foto. "
+            "Si confirman estar listos: navigate_journey(ready_for_picture). "
+            "PROHIBIDO repetir si ya narraste esto en este phase."
         )
     if "closing:generating" in text:
         return (
