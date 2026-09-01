@@ -427,6 +427,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       «Enviar reporte» / retake_photo / advance.
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
       cuando confirmen salir (sí, finalizar, finish): navigate_journey(finish).
+      Si photoSkipped=true en get_session_state: el visitante omitió la foto — NO se generó
+      tarjeta visual. PROHIBIDO mencionar tarjeta, foto o imagen. Solo correo/informe.
       PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
@@ -860,6 +862,18 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     if "closing:thanks" in text or (
         "step=closing" in text and "phase=thanks" in text
     ):
+        photo_skipped = "photoSkipped=true" in text or "IMPORTANTE: el visitante omitió la foto" in text
+        if photo_skipped:
+            return (
+                "CLOSING THANKS (sin foto) — get_session_state. "
+                "El visitante omitió la foto — NO se generó tarjeta visual. "
+                "Solo se envió el correo con el informe. "
+                "Agradecimiento cálido + invita a escanear el QR de SETI. "
+                "PROHIBIDO mencionar tarjeta, foto, imagen o retrato. Solo correo/informe. "
+                "Si el visitante confirma salir (sí, finalizar, finish, terminamos, listo): "
+                "navigate_journey(finish) de inmediato. "
+                "Si aún no confirmó: pregunta si finalizamos → ESPERA."
+            )
         return (
             "CLOSING THANKS — get_session_state. "
             "Agradecimiento cálido + invita a escanear el QR de SETI. "
