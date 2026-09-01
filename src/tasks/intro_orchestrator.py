@@ -151,6 +151,14 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
 
     del_fallback = _deliverables_script(deliverables) or _card_script(step2)
 
+    # Build a compact per-dimension line from the live content so no text is
+    # hardcoded — each dimension contributes its title + explanation.
+    dim_lines = [
+        f"{c.get('title') or c.get('name') or ''}: {str(c.get('explanation') or c.get('copy') or '').split('.')[0]}"
+        for c in _ordered_rows(content.get("dimensionConcepts"))
+        if c.get("title") or c.get("name")
+    ]
+
     return [
         # ── Card 0: Cómo interactuar ─────────────────────────────────────────
         PresentStep(
@@ -169,13 +177,6 @@ def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
         # ── Card 1: Las 5 dimensiones ────────────────────────────────────────
         # Voice is short (~12-15 s): name + one-sentence hook from the dynamic
         # dimensionConcepts data.  Deep explanations available via replay_intro_card.
-        # Build a compact per-dimension line from the live content so no text is
-        # hardcoded — each dimension contributes its title + explanation.
-        dim_lines = [
-            f"{c.get('title') or c.get('name') or ''}: {str(c.get('explanation') or c.get('copy') or '').split('.')[0]}"
-            for c in _ordered_rows(content.get("dimensionConcepts"))
-            if c.get("title") or c.get("name")
-        ]
         PresentStep(
             target="intro_step",
             index=1,
