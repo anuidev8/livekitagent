@@ -1,20 +1,19 @@
-"""Deterministic «Así funciona» tour — RPC drives UI, generate_reply drives voice.
+"""Deterministic «Así funciona» tour — one short voice narration; UI animates independently.
 
-Storyboard order and copy come from get_session_state.content (processSteps,
-dimensionConcepts, deliverableConcepts). No hardcoded Spanish scripts here.
+The intro screen now shows a single animated icon reel (gestures → 5 dimensions →
+3 deliverables) that loops automatically without any orchestrator sync.
+The agent delivers one brief spoken overview (~15-20 s) and then asks
+«¿Empezamos el análisis?» — no card-by-card coordination needed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Any
 
 from livekit.agents import AgentSession
 
-from rpc_client import rpc
-from tasks.ui_sync import PresentStep, run_present_steps, speak_director_line
+from tasks.ui_sync import speak_director_line
 
 logger = logging.getLogger("agent.intro_orchestrator")
 
@@ -34,7 +33,7 @@ def cancel_intro_tour() -> None:
 
 
 def schedule_intro_tour(session: AgentSession) -> bool:
-    """Start the intro storyboard once per session (idempotent while running)."""
+    """Start the intro narration once per session (idempotent while running)."""
     global _active_task, _run_token
     if intro_tour_running():
         logger.info("intro orchestrator already running — skip duplicate start")
@@ -45,212 +44,48 @@ def schedule_intro_tour(session: AgentSession) -> bool:
     return True
 
 
-def _ordered_rows(items: Any) -> list[dict[str, Any]]:
-    if not isinstance(items, list):
-        return []
-    rows = [item for item in items if isinstance(item, dict)]
-    return sorted(rows, key=lambda row: int(row.get("index", 0)))
-
-
-def _spotlight_line(item: dict[str, Any]) -> str:
-    name = str(item.get("name") or item.get("dimensionName") or item.get("title") or "").strip()
-    concept = str(
-        item.get("explanation") or item.get("concept") or item.get("copy") or ""
-    ).strip()
-    if name and concept:
-        return f"{name}: {concept}"
-    return concept or name
-
-
-def _points_line(step: dict[str, Any]) -> str:
-    points = step.get("points")
-    if not isinstance(points, list):
-        return ""
-    return ". ".join(str(p).strip() for p in points if str(p).strip())
-
-
-def _card_script(step: dict[str, Any]) -> str:
-    voice = str(step.get("voiceScript") or "").strip()
-    if voice:
-        return voice
-    return _points_line(step)
-
-
-async def _still_on_intro() -> bool:
-    try:
-        raw = await rpc("get_session_state")
-        data = json.loads(raw)
-    except Exception:
-        return True
-    return str(data.get("step") or "") == "intro"
-
-
-async def _step_ok(token: int) -> bool:
-    if token != _run_token:
-        return False
-    return await _still_on_intro()
-
-
-async def _load_content() -> dict[str, Any]:
-    try:
-        raw = await rpc("get_session_state")
-        state = json.loads(raw)
-    except Exception:
-        return {}
-    content = state.get("content")
-    return content if isinstance(content, dict) else {}
-
-
-def _dimensions_script(dimensions: list[dict[str, Any]]) -> str:
-    """One continuous narration covering all 5 dimension spotlights."""
-    lines = []
-    for concept in dimensions:
-        line = _spotlight_line(concept)
-        if line:
-            lines.append(line)
-    return ". ".join(lines)
-
-
-def _deliverables_script(deliverables: list[dict[str, Any]]) -> str:
-    """One continuous narration covering all 3 deliverables."""
-    lines = []
-    for item in deliverables:
-        line = _spotlight_line(item)
-        if line:
-            lines.append(line)
-    return ". ".join(lines)
-
-
-def _build_intro_steps(content: dict[str, Any]) -> list[PresentStep]:
-    """Build exactly 3 card-level steps — one voice block per card.
-
-    Card 0: gestures/interaction  (intro_step index=0)
-    Card 1: all 5 dimensions      (intro_step index=1, voice covers all at once)
-    Card 2: all 3 deliverables    (intro_step index=2, voice covers all at once)
-
-    Sub-item spotlights (intro_card_dimension / intro_deliverable) are driven
-    client-side from the live transcript via introTourTranscriptSync — not via
-    individual orchestrator steps.  This avoids the premature-ack problem where
-    a brief inter-chunk silence from Nova was incorrectly interpreted as the
-    narration ending, causing the UI card to advance before the voice finished.
-    """
-    steps_rows = _ordered_rows(content.get("processSteps"))
-    dimensions = _ordered_rows(content.get("dimensionConcepts"))
-    deliverables = _ordered_rows(content.get("deliverableConcepts"))
-
-    step0 = steps_rows[0] if steps_rows else {}
-    step1 = steps_rows[1] if len(steps_rows) > 1 else {}
-    step2 = steps_rows[2] if len(steps_rows) > 2 else {}
-
-    dim_names = [
-        str(c.get("title") or c.get("name") or "")
-        for c in dimensions
-        if c.get("title") or c.get("name")
-    ]
-    dim_fallback = _dimensions_script(dimensions) or _card_script(step1)
-
-    del_fallback = _deliverables_script(deliverables) or _card_script(step2)
-
-    # Build a compact per-dimension line from the live content so no text is
-    # hardcoded — each dimension contributes its title + explanation.
-    dim_lines = [
-        f"{c.get('title') or c.get('name') or ''}: {str(c.get('explanation') or c.get('copy') or '').split('.')[0]}"
-        for c in _ordered_rows(content.get("dimensionConcepts"))
-        if c.get("title") or c.get("name")
-    ]
-
-    return [
-        # ── Card 0: Cómo interactuar ─────────────────────────────────────────
-        PresentStep(
-            target="intro_step",
-            index=0,
-            fallback_speak=_card_script(step0),
-            pace="card",
-            extra_instructions=(
-                "BREVE y amable — 4 frases máximo. "
-                "Cubre: deslizar derecha avanza, doble izquierda sale, "
-                "en análisis deslizar cambia dimensión y pulgar arriba abre detalle, "
-                "toque o voz en cualquier momento. "
-                "PROHIBIDO dimensiones, entregables, «empezamos el análisis»."
-            ),
-        ),
-        # ── Card 1: Las 5 dimensiones ────────────────────────────────────────
-        # Voice is short (~12-15 s): name + one-sentence hook from the dynamic
-        # dimensionConcepts data.  Deep explanations available via replay_intro_card.
-        PresentStep(
-            target="intro_step",
-            index=1,
-            fallback_speak=dim_fallback,
-            pace="card",
-            extra_instructions=(
-                "BREVE — máximo 15 segundos en total. "
-                "Frase de apertura: «Cinco dimensiones de presencia digital:» "
-                "— luego di CADA nombre seguido de UNA frase corta de qué mide, "
-                "en este orden exacto: "
-                + "; ".join(dim_lines)
-                + ". Flujo continuo sin pausas largas. "
-                "PROHIBIDO explicaciones largas, preguntas retóricas ni frases de cierre extra. "
-                "PROHIBIDO listar con números ni guiones."
-            ),
-        ),
-        # ── Card 2: Qué recibirás ────────────────────────────────────────────
-        # Same approach: one block covers all 3 deliverables; client spotlights
-        # each icon from transcript keywords (radar / informe / correo).
-        PresentStep(
-            target="intro_step",
-            index=2,
-            fallback_speak=del_fallback,
-            pace="card",
-            extra_instructions=(
-                "Frase de apertura breve (~2 s) — p.ej. «Al terminar recibirás tres cosas» "
-                "— luego narra CADA entregable en orden: Radar, Informe, Correo. "
-                "Para cada uno di su nombre y UNA frase de valor. "
-                "Flujo continuo. PROHIBIDO preguntas retóricas."
-            ),
-        ),
-    ]
+def _token_valid(token: int) -> bool:
+    return token == _run_token
 
 
 async def _run_intro_tour(session: AgentSession, token: int) -> None:
     logger.info("intro orchestrator start token=%s", token)
     session.interrupt()
     try:
-        if not await _step_ok(token):
+        # Let VAD settle after interrupt before speaking.
+        await asyncio.sleep(1.0)
+
+        if not _token_valid(token):
             return
 
-        # Start content loading immediately — RPC takes ~1-2 s so run it
-        # concurrently with the VAD settle sleep below.
-        content_task = asyncio.create_task(_load_content())
-
-        # Nova Sonic's server-side VAD needs 50–600 ms to settle after
-        # session.interrupt(). Without this wait, the first card narration
-        # gets clipped by the server's own reset event.
-        await asyncio.sleep(1.2)
-
-        if not await _step_ok(token):
-            content_task.cancel()
-            return
-
-        content = await content_task
-
-        if not await _step_ok(token):
-            return
-
-        steps = _build_intro_steps(content)
-        logger.info("intro orchestrator %d director steps", len(steps))
-
-        await run_present_steps(
+        # One compact narration covering all three groups: interaction, dimensions,
+        # deliverables.  The animated reel on-screen shows the icons; the voice
+        # gives a brief orienting overview — no per-card sync required.
+        await speak_director_line(
             session,
-            steps,
-            should_continue=lambda: _step_ok(token),
+            segment_id="intro_tour:overview",
+            instructions=(
+                "BREVE recorrido de bienvenida — máximo 20 segundos en total. "
+                "Menciona en un flujo natural: "
+                "(1) que pueden navegar con gestos o con su voz, "
+                "(2) que el análisis mide cinco dimensiones: Autoridad, LinkedIn SSI, Mensaje, Influencia e Higiene, "
+                "(3) que al finalizar recibirán un radar personalizado, un informe y un correo. "
+                "Tono cálido y directo. Sin pausas largas. Sin preguntas retóricas. "
+                "PROHIBIDO listar con números o guiones. PROHIBIDO explicar cada dimensión en detalle. "
+                "Termina la locución aquí — NO preguntes si empezamos todavía."
+            ),
+            wait_for_playout=True,
+            wait_for_client_ack=False,
         )
 
-        if not await _step_ok(token):
+        if not _token_valid(token):
             return
-        try:
-            await rpc("intro_tour_finished", {})
-        except Exception as exc:
-            logger.warning("intro_tour_finished RPC failed: %s", exc)
+
+        # Brief pause so the reel has a moment to breathe before the closing question.
+        await asyncio.sleep(0.6)
+
+        if not _token_valid(token):
+            return
 
         await speak_director_line(
             session,
@@ -269,3 +104,4 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         raise
     except Exception:
         logger.exception("intro orchestrator failed token=%s", token)
+

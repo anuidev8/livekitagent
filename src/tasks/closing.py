@@ -37,9 +37,12 @@ class ClosingTask(HuellaPhaseTask):
                 camera. When they confirm → navigate_journey(ready_for_picture).
 
                 closing:capture / shutter / generating / delivered / thanks — narrate
-                each phase in sync with what is on screen. On delivered: guide to send
-                or retake. On thanks: warm farewell + invite QR scan + navigate_journey
-                finish when confirmed.
+                each phase in sync with what is on screen. On delivered: invite the visitor
+                to review the card, mention informe + foto go together to their email, and
+                explicitly offer TWO options — «Enviar reporte» or «repetir la foto»
+                (navigate_journey(retake_photo) → goes back to pose for another take).
+                If they say repetir / otra foto / retake / no me gusta: navigate_journey(retake_photo).
+                On thanks: warm farewell + invite QR scan + navigate_journey finish when confirmed.
 
                 If the step leaves report/closing (for example back to recommendations),
                 call return_to_supervisor.

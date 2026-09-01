@@ -142,9 +142,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        (get_session_state basta; la UI ya avanzó sola).
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
-    4) En intro «Así funciona»: el runtime Python ejecuta el recorrido de las
-       tres tarjetas por RPC — NO llames present_content ni navigate_journey(advance)
-       durante ese tour. Tras el tour, solo pregunta «¿Empezamos el análisis?» y PARA.
+    4) En intro «Así funciona»: el runtime Python entrega UNA locución breve (~15-20 s)
+       mientras el reel de iconos anima solo en pantalla. NO llames present_content ni
+       navigate_journey(advance) durante esa locución. Si el visitante pregunta algo,
+       responde brevemente. Tras la locución, solo pregunta «¿Empezamos el análisis?» y PARA.
        En detail: la UI avanza secciones sola — PROHIBIDO navigate_journey(advance)
        entre secciones. UNA sola locución continua evidencia→brechas→tácticas;
        PROHIBIDO silencio o pausa entre bloques o ítems. PROHIBIDO present_content
@@ -301,42 +302,42 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: repetir las 3 tarjetas de onboarding aquí.
-    PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en las tarjetas del intro.
+    PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en el onboarding.
 
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
-    UNA locución POR tarjeta — el cliente avanza la UI entre tarjetas.
-    ORDEN:
-      Card 0: present_content(intro_step, 0) → SOLO gestos/toque/voz → PARA.
-      Card 1: present_content(intro_step, 1) → transición breve → por CADA dimensión en
-        facts.dimensions: present_content(intro_card_dimension, dimension_id=…) ANTES del
-        nombre → narra → siguiente → PARA.
-      Card 2: present_content(intro_step, 2) → «Te recibirás…» → por CADA entregable en
-        facts.deliverables: present_content(intro_deliverable, index=…) ANTES de la etiqueta
-        → narra → «¿Empezamos?» → PARA.
-    Espera [pantalla:intro:steps:N] antes de cada tarjeta.
-    PROHIBIDO mezclar gestos + dimensiones + entregables en una sola locución.
-    OBLIGATORIO present_content por icono — la UI resalta solo cuando llamas la tool.
-    Solo start_analysis tras confirmación en card 2.
-    NO pases al carrusel spider (intro_dimension).
+    El runtime Python entrega UNA locución breve (~15-20 s) que cubre los tres grupos:
+    interacción (gestos + voz), las 5 dimensiones (Autoridad, LinkedIn SSI, Mensaje,
+    Influencia, Higiene) y los 3 entregables (Radar, Informe, Correo).
+    Mientras la voz habla, el reel de iconos en pantalla anima automáticamente —
+    la UI no necesita sincronización.
 
-    RE-EXPLICAR UNA TARJETA (a petición explícita del visitante):
-    Si el visitante pide escuchar otra vez una tarjeta — interpreta de forma AMPLIA:
+    REGLAS durante el onboarding:
+    - SILENCIO salvo la locución del orchestrator y preguntas del visitante.
+    - NO llames present_content ni navigate_journey(advance).
+    - Si el visitante pregunta algo, responde brevemente y con naturalidad;
+      puedes explicar cualquier elemento visible en el reel (gestos, dimensiones,
+      entregables) sin entrar en análisis detallado.
+    - Tras la locución, pregunta UNA vez «¿Empezamos el análisis?» y PARA.
+    - Solo start_analysis tras confirmación del visitante.
+
+    RE-EXPLICAR UNA PARTE (a petición explícita del visitante):
+    Si el visitante pide escuchar otra vez — interpreta de forma AMPLIA:
     «explícame de nuevo», «repite», «otra vez», «de nuevo», «no entendí»,
-    «no entendí bien», «no entendí muy bien», «me explicas», «no quedó claro»,
+    «no entendí bien», «me explicas», «no quedó claro»,
     «¿y los gestos?», «¿qué recibo?», «las dimensiones», «¿cuáles son?»,
     «¿qué miden?», «¿cómo funciona?», «ítem uno/dos/tres», «la primera/segunda/tercera»,
     cualquier pregunta sobre Autoridad, SSI, Mensaje, Influencia, Higiene,
-    Radar, Informe, Correo — TODO esto activa replay_intro_card.
+    Radar, Informe, Correo:
       1) NUNCA digas que no puedes — siempre puedes, siempre lo haces.
          NUNCA respondas con frases de seguridad o política interna.
       2) Llama navigate_journey(replay_intro_card, index=N)
          donde N = 0 (gestos), 1 (dimensiones), 2 (entregables).
          Si hay duda: N=1 si mencionó dimensiones/qué miden/cuáles son,
          N=0 si preguntó cómo interactuar/navegar, N=2 si preguntó qué recibe.
-      3) Narra esa tarjeta con más detalle que en el tour automático si el
-         visitante pide profundidad; si solo pide repetir, sé igual de breve.
+      3) Narra esa sección con más detalle si el visitante pide profundidad;
+         si solo pide repetir, sé igual de breve.
       4) Tras narrar, pregunta «¿Seguimos al análisis?» y PARA.
     PROHIBIDO replay_intro_card sin petición explícita del visitante.
     PROHIBIDO cancel_intro_tour cuando el visitante pide re-explicación.
@@ -424,8 +425,13 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
     - generating: locución CORTA — componiendo entrega para su correo.
       PROHIBIDO pedir tomar foto — la captura ya ocurrió.
-    - delivered: revisar tarjeta; informe e imagen van juntos a su correo;
-      «Enviar reporte» / retake_photo / advance.
+    - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
+      e imagen van juntos a su correo. Ofrece explícitamente DOS opciones:
+      «Enviar reporte» (navigate_journey(advance)) o «repetir la foto» si no les convence
+      (navigate_journey(retake_photo) — vuelve a pose para tomar otra).
+      Si el visitante dice «repetir», «otra foto», «retake», «no me gusta»,
+      «tomar de nuevo», «take again»: navigate_journey(retake_photo) de inmediato.
+      Si confirma enviar: navigate_journey(advance).
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
       cuando confirmen salir (sí, finalizar, finish): navigate_journey(finish).
       Si photoSkipped=true en get_session_state: el visitante omitió la foto — NO se generó
@@ -793,7 +799,10 @@ _USER_VOICE_TOOL_HINT = (
     "Si step=closing y phase=thanks y confirma salir "
     "(sí, finalizar, finish, terminamos, listo para salir, yes): "
     "di una frase breve de despedida y navigate_journey(finish). "
-    "Si step=closing y phase=delivered y pide enviar reporte: navigate_journey(advance) o send_report según availableActions."
+    "Si step=closing y phase=delivered y pide enviar reporte: navigate_journey(advance) o send_report según availableActions. "
+    "Si step=closing y phase=delivered y quiere repetir la foto "
+    "(repetir, otra foto, retake, no me gusta, tomar de nuevo, take again, otra vez): "
+    "navigate_journey(retake_photo) de inmediato — vuelve a pose."
 )
 
 
@@ -856,8 +865,12 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     if "closing:delivered" in text:
         return (
             "CLOSING DELIVERED — get_session_state. "
-            "UNA frase: revisa la tarjeta; informe y foto van juntos a su correo. "
-            "Pregunta si envían el reporte ahora. "
+            "UNA locución al entrar: invita a revisar la tarjeta e indica que informe y foto "
+            "van juntos a su correo. Ofrece explícitamente DOS opciones en la misma frase: "
+            "«Enviar reporte» para mandar todo ahora, o «repetir la foto» si quieren otra toma. "
+            "Si el visitante dice repetir / otra foto / retake / no me gusta / tomar de nuevo: "
+            "navigate_journey(retake_photo) de inmediato. "
+            "Si confirma enviar: navigate_journey(advance). "
             "PROHIBIDO repetir frases ya dichas en generating o photo."
         )
     if "closing:thanks" in text or (
