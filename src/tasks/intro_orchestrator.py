@@ -218,14 +218,25 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         if not await _step_ok(token):
             return
 
-        # Warm-up beat: claim the voice channel immediately so the LLM cannot
-        # auto-fire its own reply (triggered by the reply_required=true from
-        # get_session_state) before the orchestrator takes control.  This short
-        # utterance plays while _load_content() is fetched; by the time it
-        # finishes the session is idle and the first card speech starts cleanly
-        # without any interrupt-cut on its opening word.
-        # _load_content runs concurrently so there is no dead time after the
-        # warm-up — the first card fires as soon as the session is idle.
+        # Start content loading immediately — it takes ~1-2 s over RPC, so
+        # running it concurrently with the VAD settle costs nothing.
+        content_task = asyncio.create_task(_load_content())
+
+        # Nova Sonic's server-side VAD needs 50–600 ms to settle after
+        # session.interrupt(). Firing speak_director_line with skip_interrupt=True
+        # (no settle) before that window closes causes Nova's own reset event to
+        # clip the warmup mid-word (observed: "Bien," instead of "Bien, empezamos.").
+        # 1.2 s puts us past the worst-case reset window.
+        await asyncio.sleep(1.2)
+
+        if not await _step_ok(token):
+            content_task.cancel()
+            return
+
+        # Warm-up beat: claim the voice channel so the LLM cannot auto-fire its
+        # own reply (triggered by reply_required=true from get_session_state)
+        # before the orchestrator takes control.  VAD has now settled, so
+        # skip_interrupt=True is safe and avoids a redundant 1.2 s penalty.
         warmup_task = asyncio.create_task(
             speak_director_line(
                 session,
@@ -239,7 +250,6 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 skip_interrupt=True,
             )
         )
-        content_task = asyncio.create_task(_load_content())
         await asyncio.gather(warmup_task, content_task)
         content = content_task.result()
 
