@@ -9,6 +9,7 @@ Set tool_choice on RealtimeModel at session build time instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -62,6 +63,14 @@ async def generate_reply_safe(
     return handle
 
 
-async def wait_for_agent_idle(session: AgentSession) -> None:
-    """Wait until the session has no in-flight agent speech or tool work."""
-    await session.wait_for_idle()
+async def wait_for_agent_idle(session: AgentSession, timeout: float = 1.5) -> None:
+    """Wait until the session has no in-flight agent speech or tool work.
+
+    A short timeout guards against Nova Sonic still processing a user turn
+    after session.interrupt() — we don't want to block the director for seconds
+    just because the model hasn't flushed its internal state yet.
+    """
+    try:
+        await asyncio.wait_for(session.wait_for_idle(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.debug("wait_for_agent_idle timed out after %.1fs — continuing", timeout)

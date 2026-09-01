@@ -244,9 +244,6 @@ async def present_and_speak(
     wait_for_client_ack: bool = True,
 ) -> dict[str, Any]:
     """Update the kiosk UI first, narrate, then wait for room audio to finish."""
-    session.interrupt()
-    await wait_for_agent_idle(session)
-
     data = await rpc_present_content(
         target=target,
         index=index,
