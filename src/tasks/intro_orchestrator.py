@@ -211,7 +211,34 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
         if not await _step_ok(token):
             return
 
-        content = await _load_content()
+        # Warm-up beat: claim the voice channel immediately so the LLM cannot
+        # auto-fire its own reply (triggered by the reply_required=true from
+        # get_session_state) before the orchestrator takes control.  This short
+        # utterance plays while _load_content() is fetched; by the time it
+        # finishes the session is idle and the first card speech starts cleanly
+        # without any interrupt-cut on its opening word.
+        # _load_content runs concurrently so there is no dead time after the
+        # warm-up — the first card fires as soon as the session is idle.
+        warmup_task = asyncio.create_task(
+            speak_director_line(
+                session,
+                segment_id="intro_tour:warmup",
+                instructions=(
+                    "Di EXACTAMENTE esta frase, sin añadir nada antes ni después: "
+                    "«Empezamos.» — una sola palabra, pausa natural. PARA de inmediato."
+                ),
+                wait_for_playout=True,
+                wait_for_client_ack=False,
+                skip_interrupt=True,
+            )
+        )
+        content_task = asyncio.create_task(_load_content())
+        await asyncio.gather(warmup_task, content_task)
+        content = content_task.result()
+
+        if not await _step_ok(token):
+            return
+
         steps = _build_intro_steps(content)
         logger.info("intro orchestrator %d director steps", len(steps))
 
