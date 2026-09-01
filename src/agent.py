@@ -495,9 +495,11 @@ def build_on_enter_instructions(state: dict) -> str:
         )
     if step in ("identify_gate", "identify_search"):
         return (
-            f"Pantalla {step}. Explica identificación (manilla o nombre). "
-            "En identify_search: al oír el nombre llama fill_search y di solo "
-            "'Buscando…'. NO llames navigate_journey."
+            f"Pantalla {step}. "
+            "Explica brevemente (2 frases máx): el sistema no confirmó la credencial, "
+            "pueden acercar la manilla de nuevo o decir su nombre completo en voz alta. "
+            "No anuncies lo que harás — simplemente actúa cuando el visitante hable. "
+            "NO llames navigate_journey."
         )
     if step == "intro":
         return (
