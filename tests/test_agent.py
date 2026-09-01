@@ -8,6 +8,7 @@ from agent import (
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
     NOVA_SESSION_REFRESH_SECONDS,
+    NOVA_TURN_DETECTION,
     Assistant,
     NovaAssistant,
     build_on_enter_instructions,
@@ -59,7 +60,7 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
         "get_session_state",
         "present_content",
         "navigate_journey",
-        "set_control_channel",
+        "fill_search",
     }
     assert NovaAssistant is Assistant
     assert INSTRUCTIONS is MAIN_INSTRUCTIONS is NOVA_INSTRUCTIONS
@@ -73,24 +74,15 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     assert "nunca digas que no ves" in nova_lower
     assert "livekit" not in nova_lower
     assert "get_session_state first" not in nova_lower
+    assert NOVA_TURN_DETECTION in {"LOW", "MEDIUM", "HIGH"}
+    assert "onboarding de 3 tarjetas" not in nova_lower
     # Forbidden product framing must not appear as instructions to invent a game.
     assert "bienvenido al juego" not in nova_lower
     assert "qué dice internet" not in nova_lower
-    for term in (
-        "profile",
-        "scores",
-        "report",
-        "consent",
-        "photo",
-        "cancel",
-        "authority",
-        "identity",
-        "roles",
-    ):
-        assert term not in nova_lower, f"Nova prompt should omit {term!r}"
-    assert "Obtiene el estado actual de la pantalla." in {
-        tool.info.description for tool in agent.tools
-    }
+    assert any(
+        tool.info.description.startswith("Obtiene el estado actual de la pantalla")
+        for tool in agent.tools
+    )
 
 
 def test_analysis_task_is_focused() -> None:

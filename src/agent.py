@@ -30,10 +30,10 @@ from livekit.agents import (
 )
 from livekit.plugins import ai_coustics, cartesia
 
+from narration_barrier import NarrationBarrier, set_session_narration_barrier
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
 from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
-from narration_barrier import NarrationBarrier, set_session_narration_barrier
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -81,7 +81,9 @@ AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "huella-guide")
 # Nova Sonic 2 Spanish (es-US): lupe (feminine) | carlos (masculine)
 # https://docs.livekit.io/agents/models/realtime/plugins/nova-sonic/
 NOVA_VOICE = os.getenv("NOVA_VOICE", "lupe")
-NOVA_TURN_DETECTION = os.getenv("NOVA_TURN_DETECTION", "MEDIUM")
+# LOW is intentionally patient for a noisy event kiosk. Deployments can still
+# override this through NOVA_TURN_DETECTION without changing application code.
+NOVA_TURN_DETECTION = os.getenv("NOVA_TURN_DETECTION", "LOW").strip().upper()
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Voice backend: nova (default) | cartesia (STT/LLM Inference + Cartesia Sonic TTS)
@@ -152,6 +154,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        extra tras la primera entrada (salvo petición explícita del visitante).
     Los [pantalla:] traen pista de step/phase/identity/focus.
     Úsalos para foco y timing; no inventes pantallas ni datos de perfil.
+    NUNCA digas que no ves la pantalla: consulta get_session_state y responde
+    desde sus facts sin mencionar limitaciones internas.
 
     PROHIBIDO ABSOLUTO — NUNCA LEAS EN VOZ ALTA:
     - El texto de mensajes [pantalla:…] (ni completo ni fragmentado).
@@ -189,13 +193,9 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     «ahora voy a», «iniciamos el demo», «a continuación» ni nada similar —
     simplemente ejecuta la acción sin comentarla.
 
-    Targets válidos de present_content:
+    Targets válidos de present_content fuera de «Así funciona»:
     - attract_tour (solo index -1), gesture_practice,
       welcome_preparation (index 0..2),
-      intro_step (index 0=Cómo interactuar, 1=Las 5 dimensiones, 2=Qué recibirás),
-      intro_card_dimension (iconos en tarjeta 1; dimension_id=serp|ssi|arquitectura|influencia|higiene),
-      intro_deliverable (iconos en tarjeta 2; index 0=Radar,1=Informe,2=Correo),
-      intro_dimension (spider legacy — no usar en onboarding de 3 tarjetas),
       result_dimension (index 0..4 o dimensionId),
       detail_dimension (+dimensionId), detail_section (+section),
       recommendation_item.
@@ -300,13 +300,12 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        una invitación («¿Vemos cómo funciona?» o similar) y PARA.
        PROHIBIDO llamar navigate_journey mientras hablas en este paso.
     PASO 2 — Después de que el visitante responda (continuar / adelante /
-       seguimos / listo / empezamos / sí) O después de una pausa natural
-       si no dice nada: llama navigate_journey(start_experience) en ese
+       seguimos / listo / empezamos / sí): llama navigate_journey(start_experience) en ese
        momento — NO en el mismo turno que el saludo.
     Tras start_experience ok: SILENCIO TOTAL. PROHIBIDO repetir nombre/rol/
-    empresa o el saludo. Espera [pantalla:intro:steps] y sigue Screen 5.
+    empresa o el saludo. Espera [pantalla:intro:run] y sigue Screen 5.
     PROHIBIDO: present_content en welcome:ready.
-    PROHIBIDO: repetir las 3 tarjetas de onboarding aquí.
+    PROHIBIDO: adelantar el contenido del reel de onboarding aquí.
     PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en el onboarding.
 
     ────────────────────────────────────────────────
@@ -360,7 +359,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        con calidez anclado en facts.uiStandingLine (el título en pantalla):
        mismos puntos (rol, standingBlurb/banda, dimensión más fuerte), pero
        MÁS AMABLE y conversacional — PROHIBIDO leer uiStandingLine literal.
-       En el mismo flujo (3–5 oraciones): UNA fortaleza concreta de
+       En el mismo flujo (3-5 oraciones): UNA fortaleza concreta de
        facts.strengths o facts.coverLines y UNA brecha de facts.opportunities
        o facts.weakestDimension — solo datos del informe, tono consultor C-level.
        PROHIBIDO recitar solo «LÍDER · TOP 8%». Invita a abrir el detalle
@@ -444,8 +443,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
-    — Onboarding (tarjetas 1–3 dentro de intro): avanzan SOLAS tras tu narración.
-      NO preguntes entre tarjetas. Ignora swipes ahí (el cliente no los usa).
+    — Onboarding (reel único dentro de intro): el reel anima solo durante una
+      locución continua. Ignora swipes ahí (el cliente no los usa).
     — Entre pantallas / vistas (welcome→intro, analysis→detalle, detalle→recs, etc.):
       Si llega [pantalla:…] con SWIPE_CONTINUE_REQUEST: el cliente NO avanzó.
       Pregunta breve «¿Seguimos?» / «¿Avanzamos?». Solo si confirma → navigate_journey.
@@ -499,9 +498,7 @@ def on_enter_should_defer(state: dict) -> bool:
     phase = state.get("phase")
     # welcome:preparing — silent prewarm; welcome:ready — client sends cue on
     # voice enable (avoids racing on_enter with a parallel get_session_state).
-    if step == "welcome" and phase in ("preparing", "ready"):
-        return True
-    return False
+    return step == "welcome" and phase in ("preparing", "ready")
 
 
 def build_on_enter_instructions(state: dict) -> str:
@@ -616,11 +613,7 @@ class Assistant(Agent):
     ) -> str:
         """Enfoca UN elemento visible. Targets EXACTOS: attract_tour
         (solo index -1 título), gesture_practice,
-        welcome_preparation (0..2 prep), intro_step (0=primero, 1=segundo,
-        2=tercero), intro_card_dimension (tarjeta Las 5 dimensiones;
-        mejor dimension_id=serp|ssi|arquitectura|influencia|higiene),
-        intro_deliverable (Qué recibirás; index 0=Radar,1=Informe,2=Correo
-        o dimension_id=radar|informe|correo),         intro_dimension (spider legacy), result_dimension (solo analysis:results),
+        welcome_preparation (0..2 prep), result_dimension (solo analysis:results),
         detail_dimension (+dimension_id; usar en complete si piden «detalle»),
         detail_section
         (+section), recommendation_item. Compón tu mensaje desde facts.hint
@@ -774,6 +767,9 @@ _USER_VOICE_TOOL_HINT = (
     "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
+    "Si step=intro y el visitante confirma comenzar "
+    "(sí, adelante, empecemos, empezamos, iniciar, dale, vamos): "
+    "navigate_journey(start_analysis) de inmediato, sin repetir el reel. "
     "Si step=intro y el visitante pide re-explicar una tarjeta — "
     "interpreta de forma AMPLIA: cualquier señal de confusión, re-consulta o petición sobre "
     "el contenido de las tarjetas debe activar replay_intro_card. "
@@ -1037,10 +1033,6 @@ async def my_agent(ctx: JobContext):
                 "INTRO_ORCHESTRATOR_START" in event.text
                 or "intro:run" in event.text
             )
-            intro_continuous = (
-                "INTRO_CONTINUOUS_TOUR" in event.text
-                or "INTRO_CARD_READY" in event.text
-            )
             detail_revisit = (
                 "detail:revisit" in event.text or "DETAIL_REVISIT" in event.text
             )
@@ -1074,8 +1066,7 @@ async def my_agent(ctx: JobContext):
                 )
                 return
 
-            if intro_orchestrator_start or intro_continuous:
-                agent_session.interrupt()
+            if intro_orchestrator_start:
                 if schedule_intro_tour(agent_session):
                     logger.info(
                         "[text_input] intro orchestrator started from pantalla"
@@ -1140,6 +1131,7 @@ async def my_agent(ctx: JobContext):
                         "[rol], [empresa] o cualquier otro placeholder — son variables internas, NUNCA se dicen. "
                         "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
                         "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
+                        "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
                         "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
                         "PARA y espera confirmación del visitante. "
                         "PASO 2 — solo cuando confirme (sí / continuar / adelante / vamos / dale): "
@@ -1186,7 +1178,7 @@ async def my_agent(ctx: JobContext):
                 agent_session.generate_reply(
                     user_input=event.text,
                     instructions=(
-                        "INTRO TOUR ACTIVE — el orchestrator Python narra las tarjetas. "
+                        "INTRO TOUR ACTIVE — el orchestrator Python narra el reel. "
                         "Si el visitante hace una pregunta directa: responde en ≤2 frases. "
                         "Si el visitante pide re-explicar una tarjeta — interpreta de forma AMPLIA: "
                         "cualquier señal de confusión, 'no entendí', 'no entendí bien', "

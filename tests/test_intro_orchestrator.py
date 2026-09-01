@@ -1,36 +1,53 @@
-from tasks.intro_orchestrator import _build_intro_steps
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from tasks import intro_orchestrator
 
 
-def test_build_intro_steps_follows_storyboard_order() -> None:
-    content = {
-        "processSteps": [
-            {"index": 0, "voiceScript": "card0"},
-            {"index": 1, "transitionSpeak": "bridge1"},
-            {"index": 2, "transitionSpeak": "bridge2"},
-        ],
-        "dimensionConcepts": [
-            {"id": "ssi", "index": 0, "explanation": "ssi line"},
-            {"id": "reputation", "index": 1, "explanation": "rep line"},
-        ],
-        "deliverableConcepts": [
-            {"id": "card", "index": 0, "concept": "card line"},
-            {"id": "report", "index": 1, "concept": "report line"},
-        ],
-    }
+@pytest.mark.asyncio
+async def test_intro_tour_waits_for_current_turn_then_uses_one_uninterrupted_reply() -> None:
+    session = object()
+    intro_orchestrator._run_token = 41
 
-    steps = _build_intro_steps(content)
+    with (
+        patch(
+            "tasks.intro_orchestrator.wait_for_agent_idle", new=AsyncMock()
+        ) as wait_for_idle,
+        patch("tasks.intro_orchestrator.asyncio.sleep", new=AsyncMock()),
+        patch(
+            "tasks.intro_orchestrator.speak_director_line", new=AsyncMock()
+        ) as speak,
+    ):
+        await intro_orchestrator._run_intro_tour(session, token=41)
 
-    assert [s.target for s in steps] == [
-        "intro_step",
-        "intro_step",
-        "intro_card_dimension",
-        "intro_card_dimension",
-        "intro_step",
-        "intro_deliverable",
-        "intro_deliverable",
-    ]
-    assert steps[0].index == 0 and steps[0].pace == "card"
-    assert steps[1].index == 1 and steps[1].pace == "transition"
-    assert steps[2].dimension_id == "ssi"
-    assert steps[4].index == 2
-    assert steps[5].dimension_id == "card"
+    wait_for_idle.assert_awaited_once_with(session, timeout=12.0)
+    speak.assert_awaited_once()
+    kwargs = speak.await_args.kwargs
+    assert kwargs["segment_id"] == "intro_tour"
+    assert kwargs["skip_interrupt"] is True
+    assert kwargs["wait_for_playout"] is True
+    assert kwargs["wait_for_client_ack"] is True
+    assert "Autoridad" in kwargs["instructions"]
+    assert "LinkedIn SSI" in kwargs["instructions"]
+    assert "radar personalizado" in kwargs["instructions"]
+    assert "¿Empezamos el análisis?" in kwargs["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_intro_token_never_starts_speech() -> None:
+    session = object()
+    intro_orchestrator._run_token = 8
+
+    with (
+        patch(
+            "tasks.intro_orchestrator.wait_for_agent_idle", new=AsyncMock()
+        ),
+        patch("tasks.intro_orchestrator.asyncio.sleep", new=AsyncMock()),
+        patch(
+            "tasks.intro_orchestrator.speak_director_line", new=AsyncMock()
+        ) as speak,
+    ):
+        await intro_orchestrator._run_intro_tour(session, token=7)
+
+    speak.assert_not_awaited()
