@@ -943,9 +943,15 @@ _USER_VOICE_TOOL_HINT = (
     "primero, una nueva interrupción del visitante corta tu turno antes de que "
     "el tool call llegue a ejecutarse. "
     "Si step=closing y phase=delivered y pide enviar reporte: navigate_journey(advance) o send_report según availableActions. "
-    "Si step=closing y phase=delivered y quiere repetir la foto "
-    "(repetir, otra foto, retake, no me gusta, tomar de nuevo, take again, otra vez): "
-    "navigate_journey(retake_photo) de inmediato — vuelve a pose."
+    "Si step=closing y phase=delivered y quiere una foto para la tarjeta — ya sea "
+    "repetirla (repetir, otra foto, retake, no me gusta, tomar de nuevo, take again, "
+    "otra vez) o tomarla por primera vez porque antes la omitió (quiero tomarme una "
+    "foto, quiero tomar una foto, sí quiero foto, quiero una foto, take a picture, "
+    "take picture, con foto después de todo): "
+    "navigate_journey(retake_photo) de inmediato — vuelve a pose. Misma acción en "
+    "ambos casos; NO exijas que use la palabra «repetir» — facts.photoSkipped ya te "
+    "dice si es la primera foto o una repetición, la frase del visitante no tiene "
+    "que distinguirlo."
 )
 
 
@@ -1025,12 +1031,13 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     if "closing:delivered" in text:
         return (
             "CLOSING DELIVERED — get_session_state. "
-            "UNA locución al entrar: invita a revisar la tarjeta e indica que informe y foto "
-            "van juntos a su correo. "
-            "Si facts.photoSkipped es true: ofrece «Enviar reporte» o tomarse una foto para "
-            "su tarjeta — di «tomar una foto», NUNCA «repetir la foto» (nunca se tomó una). "
-            "Si facts.photoSkipped es false: ofrece «Enviar reporte» o «repetir la foto» "
-            "si no les convence. "
+            "UNA locución al entrar: invita a revisar la tarjeta. "
+            "Si facts.photoSkipped es true: indica que el informe va a su correo (SIN "
+            "mencionar foto ni imagen — no se tomó ninguna, decir «junto con la imagen» "
+            "sería falso), y ofrece «Enviar reporte» o tomarse una foto para su tarjeta "
+            "— di «tomar una foto», NUNCA «repetir la foto» (nunca se tomó una). "
+            "Si facts.photoSkipped es false: indica que informe y foto van juntos a su "
+            "correo, y ofrece «Enviar reporte» o «repetir la foto» si no les convence. "
             "Solo navigate_journey(retake_photo) si el visitante pide EXPLÍCITAMENTE la foto "
             "(repetir / otra foto / retake / tomar de nuevo / take again, o «quiero tomarme "
             "una foto» si antes la omitió). Solo navigate_journey(advance) si confirma "

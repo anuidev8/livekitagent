@@ -8,6 +8,7 @@ import agent as agent_module
 from agent import (
     _GENERATING_SETI_FACTS,
     _PANTALLA_INTERRUPT_GRACE_S,
+    _USER_VOICE_TOOL_HINT,
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
@@ -434,6 +435,52 @@ def test_generating_keepalive_requires_short_transition_not_cold_open() -> None:
     # "no long preambles" ceiling from the earlier fix.
     assert "mientras se termina de armar tu tarjeta" not in instructions.lower()
     assert "sin preámbulos largos" in instructions
+
+
+def test_delivered_voice_hint_covers_first_time_photo_request() -> None:
+    """Regression (2026-09-02, RM_vZnfXrLvRboG logs): a visitor who had
+    skipped the photo earlier said "quiero tomarme una foto" at
+    closing:delivered. The per-turn voice hint's retake_photo trigger list
+    only recognized "repeat" phrasing (repetir, otra foto, retake...), so
+    the model verbally agreed ("Entiendo que quieres tomarte una foto... "
+    "Colócate frente al espejo...") without ever calling
+    navigate_journey(retake_photo) — the screen never moved, the visitor
+    was left staring at the same delivered card. The hint must also
+    recognize wanting a first photo (not just a repeat) as a trigger for
+    the same tool.
+    """
+    hint = _USER_VOICE_TOOL_HINT
+    idx = hint.find("phase=delivered y quiere una foto")
+    assert idx != -1
+    window = hint[idx : idx + 400]
+    assert "quiero tomarme una foto" in window
+    assert "navigate_journey(retake_photo)" in window
+
+
+def test_delivered_narration_does_not_claim_photo_when_skipped() -> None:
+    """Regression (same session as above): with facts.photoSkipped true,
+    the agent said "tu informe, junto con la imagen, viajarán juntos a tu
+    correo" — false, no photo was ever taken. The old opening line
+    unconditionally claimed "informe y foto van juntos"; it must instead
+    branch on facts.photoSkipped and say nothing about a photo/image when
+    none was taken.
+    """
+    delivered = _closing_pantalla_instructions(
+        "[pantalla:closing:delivered] step=closing phase=delivered"
+    )
+    assert delivered is not None
+    idx_skipped = delivered.find("photoSkipped es true")
+    idx_not_skipped = delivered.find("photoSkipped es false")
+    assert idx_skipped != -1
+    assert idx_not_skipped != -1
+    assert idx_skipped < idx_not_skipped
+
+    intro = delivered[:idx_skipped]
+    assert "informe y foto" not in intro.lower()
+    assert "informe e imagen" not in intro.lower()
+
+    skipped_block = delivered[idx_skipped:idx_not_skipped]
+    assert "sin mencionar foto" in skipped_block.lower()
 
 
 @pytest.mark.asyncio
