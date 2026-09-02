@@ -1,8 +1,10 @@
 import asyncio
+from unittest.mock import MagicMock, patch
 
 import pytest
 from livekit.agents import inference, llm
 
+import agent as agent_module
 from agent import (
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
@@ -11,6 +13,8 @@ from agent import (
     NOVA_TURN_DETECTION,
     Assistant,
     NovaAssistant,
+    _deliver_pantalla_reply,
+    _pending_pantalla_replies,
     build_on_enter_instructions,
     on_enter_should_defer,
 )
@@ -61,6 +65,7 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
         "present_content",
         "navigate_journey",
         "fill_search",
+        "answer_seti_question",
     }
     assert NovaAssistant is Assistant
     assert INSTRUCTIONS is MAIN_INSTRUCTIONS is NOVA_INSTRUCTIONS
@@ -83,6 +88,12 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
         tool.info.description.startswith("Obtiene el estado actual de la pantalla")
         for tool in agent.tools
     )
+    # Regression: a real session (2026-09-02 logs) had the guide narrate the
+    # SETI knowledge-base tool's perceived gaps out loud ("aunque no se
+    # proporcionaron detalles específicos...") instead of speaking
+    # confidently from what the tool did return.
+    assert "respuesta de la herramienta es incompleta" in nova_lower
+    assert "answer_seti_question" in nova_lower
 
 
 def test_analysis_task_is_focused() -> None:
@@ -184,7 +195,86 @@ async def test_nova_recycle_cancels_a_stale_independent_timer() -> None:
     await fake._session_recycle_task
 
 
-@pytest.mark.skip(reason="Requires LiveKit Inference credits; Nova is the only voice backend.")
+@pytest.mark.skip(
+    reason="Requires LiveKit Inference credits; Nova is the only voice backend."
+)
 async def test_unused_inference_judge_smoke() -> None:
     llm_inst = _judge_llm()
     assert llm_inst is not None
+
+
+def test_deliver_pantalla_reply_speaks_immediately_when_idle() -> None:
+    """No in-flight speech (None, or already done) — speak right away, no task."""
+    session = MagicMock()
+    session.current_speech = None
+    _deliver_pantalla_reply(session, "hola")
+    session.generate_reply.assert_called_once_with(instructions="hola")
+    assert not _pending_pantalla_replies
+
+    session2 = MagicMock()
+    done_handle = MagicMock()
+    done_handle.done.return_value = True
+    session2.current_speech = done_handle
+    _deliver_pantalla_reply(session2, "hola de nuevo")
+    session2.generate_reply.assert_called_once_with(instructions="hola de nuevo")
+    assert not _pending_pantalla_replies
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_waits_for_current_speech_then_speaks() -> None:
+    """Speech in flight — defer to a background task, don't cut it off, don't
+    interrupt once it finishes naturally within the grace period."""
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+
+    async def _finishes_quickly() -> None:
+        return None
+
+    handle.wait_for_playout = _finishes_quickly
+    session.current_speech = handle
+
+    _deliver_pantalla_reply(session, "nuevo contenido")
+
+    # Deferred, not fired synchronously — the whole point is not to chop off
+    # the in-flight utterance.
+    session.generate_reply.assert_not_called()
+    assert len(_pending_pantalla_replies) == 1
+
+    await asyncio.gather(*_pending_pantalla_replies)
+
+    handle.interrupt.assert_not_called()
+    session.generate_reply.assert_called_once_with(instructions="nuevo contenido")
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_force_interrupts_after_grace_period() -> None:
+    """Speech that runs long — bounded wait, then force-interrupt, then speak.
+    This is the safety net so a stuck/long utterance can't indefinitely delay
+    new screen content, mirroring the on_enter timeout fix."""
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+
+    async def _never_finishes() -> None:
+        await asyncio.sleep(10)
+
+    handle.wait_for_playout = _never_finishes
+    session.current_speech = handle
+
+    with patch.object(agent_module, "_PANTALLA_INTERRUPT_GRACE_S", 0.05):
+        _deliver_pantalla_reply(session, "contenido urgente")
+        assert len(_pending_pantalla_replies) == 1
+        await asyncio.gather(*_pending_pantalla_replies)
+
+    handle.interrupt.assert_called_once()
+    session.generate_reply.assert_called_once_with(instructions="contenido urgente")
+
+
+@pytest.mark.asyncio
+async def test_answer_seti_question_tool_delegates_to_knowledge_base() -> None:
+    agent = Assistant()
+    result = await agent.answer_seti_question(
+        context=None, query="¿qué servicios ofrece SETI?"
+    )
+    assert "Desarrollo" in result or "PRIME" in result

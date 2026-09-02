@@ -67,12 +67,24 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
             session,
             segment_id="intro_tour",
             instructions=(
-                "Entrega UNA sola locución natural de máximo 20 segundos, sin herramientas "
-                "ni pausas largas. Explica que pueden interactuar con gestos en el aire o "
-                "con la voz; que explorarán cinco dimensiones: Autoridad, LinkedIn SSI, "
-                "Mensaje, Influencia e Higiene; y que al finalizar recibirán un radar "
-                "personalizado, un informe detallado y el resumen en su correo. "
-                "No enumeres con números ni expliques cada dimensión. Cierra dentro de la "
+                "Entrega UNA sola locución natural de máximo 28 segundos, sin herramientas "
+                "ni pausas largas. PROHIBIDO abrir anunciando lo que vas a hacer «ahora te "
+                "explico», «vamos a ver cómo funciona», «te cuento el onboarding» y similares "
+                "— PROHIBIDO decir la palabra 'onboarding'. Entra DIRECTO al contenido, "
+                "explicando ya mismo que pueden interactuar con gestos en el aire "
+                "—deslizar para avanzar— o con la voz. "
+                "Menciona las cinco dimensiones, cada una con una idea MUY corta (3-5 "
+                "palabras, no una oración completa) de qué mide — no las enumeres con "
+                "números ni las expliques a fondo, solo nómbralas con esa idea breve: "
+                "Autoridad (qué tan visible eres en Google), LinkedIn SSI "
+                "(tu fuerza en LinkedIn), Mensaje (qué tan claro comunicas), Influencia "
+                "(cuánto alcance tiene tu voz más allá de tu organización), e Higiene "
+                "(qué tan protegido está tu rastro digital). "
+                "Justo ahí, al hablar de las dimensiones, explica que en sus resultados "
+                "podrán deslizar la mano a la izquierda o derecha para navegar entre "
+                "ellas, y que el pulgar arriba es para VER el detalle de la que les interese. "
+                "Cierra explicando que al finalizar recibirán un radar personalizado, "
+                "un informe detallado y el resumen en su correo. Cierra dentro de la "
                 "MISMA locución con «¿Empezamos el análisis?» y PARA."
             ),
             wait_for_playout=True,

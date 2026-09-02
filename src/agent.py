@@ -13,6 +13,7 @@ import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -30,6 +31,7 @@ from livekit.agents import (
 )
 from livekit.plugins import ai_coustics, cartesia
 
+from knowledge_base import search_seti_knowledge
 from narration_barrier import NarrationBarrier, set_session_narration_barrier
 from nova_session_continuation import install_nova_session_continuation_fix
 from rpc_client import rpc, wait_for_kiosk_participant
@@ -117,6 +119,15 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Ritmo pausado y suave: oraciones completas, con pausa breve entre ellas.
     Solo español. Sin markdown ni listas.
 
+    SI LA PETICIÓN NO ES CLARA (en cualquier pantalla o fase):
+    NUNCA digas «lo siento», «no puedo procesar eso», «no puedo responder»,
+    ni te disculpes por no entender o por estar ocupada. NUNCA menciones
+    el sistema, la pantalla, ni que «no puedes» hacer algo. En vez de eso,
+    pregunta UNA vez, breve y natural, reofreciendo en tus propias palabras
+    las opciones ya disponibles en esa pantalla — como lo haría una
+    anfitriona real que no escuchó bien, no como un asistente que rechaza
+    una solicitud.
+
     GENERAS TU PROPIO MENSAJE — no eres un lector de guión.
     La herramienta devuelve "facts" con datos y un "hint" de composición.
     Úsalos como ancla de verdad y compón tú misma el mensaje en lenguaje
@@ -144,7 +155,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        (get_session_state basta; la UI ya avanzó sola).
     3) Lee facts.hint y los campos de facts. Compón tu mensaje con tus propias
        palabras siguiendo el hint como guía de estilo y tono.
-    4) En intro «Así funciona»: el runtime Python entrega UNA locución breve (~15-20 s)
+    4) En intro «Así funciona»: el runtime Python entrega UNA locución breve (~25-30 s)
        mientras el reel de iconos anima solo en pantalla. NO llames present_content ni
        navigate_journey(advance) durante esa locución. Si el visitante pregunta algo,
        responde brevemente. Tras la locución, solo pregunta «¿Empezamos el análisis?» y PARA.
@@ -182,6 +193,21 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Llama present_content con el target del elemento mencionado para enfocarlo
     y narra ese elemento en detalle. Pregunta si quiere continuar desde ahí.
     No esperes palabras exactas — infiere la intención del visitante.
+
+    REGLA DE PREGUNTAS SOBRE SETI (cualquier pantalla):
+    Si el visitante pregunta algo sobre SETI como empresa — qué es, qué
+    servicios ofrece, quiénes son sus clientes, con qué partners trabaja, qué
+    casos de éxito tiene, o cómo contactarlos — y esa información no está ya
+    en facts de get_session_state, llama answer_seti_question(query) con la
+    pregunta del visitante. El resultado trae varios fragmentos: usa solo los
+    que respondan la pregunta y habla de ellos con seguridad, como una
+    anfitriona que conoce bien la empresa. No inventes datos de SETI que no
+    vengan del resultado, y no leas ningún fragmento literal.
+    PROHIBIDO ABSOLUTO decir que la respuesta de la herramienta es incompleta,
+    que faltan detalles, que no se mencionaron ciertos datos, o cualquier
+    variante de eso — si algo no aparece en el resultado, simplemente no
+    hables de eso, igual que harías con cualquier otro tema que no conoces.
+    Tras responder, retoma el flujo donde ibas.
 
     PROHIBIDO decir frases de espera («un momento», «espera», «ya casi»)
     fuera de pantallas que de verdad cargan: welcome identifying (preparing),
@@ -253,8 +279,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     será encontrado o no en la base de datos.
 
     Tus responsabilidades:
-    - SILENCIO TOTAL mientras phase=preparing. El cliente pre-calienta la
-      sesión de voz sin locución — la primera voz es el saludo en welcome:ready.
+    - SIN HABLAR mientras phase=preparing: no generes ninguna respuesta ni
+      digas nada — ni siquiera para anunciar que esperas o que hay silencio.
+      El cliente pre-calienta la sesión de voz sin locución — la primera
+      voz es el saludo en welcome:ready.
     PROHIBIDO hablar, narrar o llamar herramientas mientras phase=preparing.
     PROHIBIDO enumerar ítems del checklist o mencionarlos uno a uno.
     PROHIBIDO pedir continuar o confirmación.
@@ -302,8 +330,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PASO 2 — Después de que el visitante responda (continuar / adelante /
        seguimos / listo / empezamos / sí): llama navigate_journey(start_experience) en ese
        momento — NO en el mismo turno que el saludo.
-    Tras start_experience ok: SILENCIO TOTAL. PROHIBIDO repetir nombre/rol/
-    empresa o el saludo. Espera [pantalla:intro:run] y sigue Screen 5.
+    Tras start_experience ok: NO digas nada más en este turno — ni el
+    saludo, ni nombre/rol/empresa, ni palabras como «silencio» o
+    «esperando» ni ningún meta-comentario sobre pausas. Deja que
+    [pantalla:intro:run] continúe sola; sigue Screen 5 cuando llegue.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: adelantar el contenido del reel de onboarding aquí.
     PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en el onboarding.
@@ -311,14 +341,17 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
-    El runtime Python entrega UNA locución breve (~15-20 s) que cubre los tres grupos:
-    interacción (gestos + voz), las 5 dimensiones (Autoridad, LinkedIn SSI, Mensaje,
-    Influencia, Higiene) y los 3 entregables (Radar, Informe, Correo).
+    El runtime Python entrega UNA locución breve (~25-30 s) que cubre los tres grupos:
+    interacción (gestos + voz), las 5 dimensiones con una idea muy corta de qué
+    mide cada una (Autoridad, LinkedIn SSI, Mensaje, Influencia, Higiene) y los
+    3 entregables (Radar, Informe, Correo).
     Mientras la voz habla, el reel de iconos en pantalla anima automáticamente —
     la UI no necesita sincronización.
 
     REGLAS durante el onboarding:
-    - SILENCIO salvo la locución del orchestrator y preguntas del visitante.
+    - NO hables por tu cuenta durante el onboarding — solo la locución del
+      orchestrator o una respuesta a una pregunta del visitante. PROHIBIDO
+      anunciar que estás en silencio o esperando.
     - NO llames present_content ni navigate_journey(advance).
     - Si el visitante pregunta algo, responde brevemente y con naturalidad;
       puedes explicar cualquier elemento visible en el reel (gestos, dimensiones,
@@ -418,16 +451,24 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       una foto para tu tarjeta? Será la portada visual de tu informe.»
       Dos caminos:
         • El visitante dice sí / quiero / adelante →
-            navigate_journey(ready_for_picture)  [genera la tarjeta con foto]
+            LLAMA navigate_journey(ready_for_picture) PRIMERO [genera la tarjeta con foto]
         • El visitante dice no / omitir / sin foto →
-            navigate_journey(skip_photo)  [arma la tarjeta igual, sin foto — pasa por generating y delivered]
+            LLAMA navigate_journey(skip_photo) PRIMERO [arma la tarjeta igual, sin foto — pasa por generating y delivered]
+      En ambos casos: llama el tool ANTES de decir cualquier frase de
+      confirmación o del siguiente paso («colócate», «perfecto, continuamos
+      sin foto»...). El tool call es lo que mueve la pantalla — narrar el
+      resultado sin haberlo llamado deja la pantalla sin avanzar aunque tu
+      voz suene como si ya hubiera pasado.
       PROHIBIDO avanzar sin respuesta. PROHIBIDO preguntar dos veces.
       Si el visitante no responde o la voz no funciona, los botones
       en pantalla están disponibles («Sí, con foto» / «Continuar sin foto»).
     - pose: UNA locución — invita al visitante a colocarse frente al espejo.
       Cuando confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
       Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
-    - generating: locución CORTA — componiendo entrega para su correo.
+    - generating: locución CORTA — componiendo entrega para su correo. Dila
+      UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla o reformularla con
+      otras palabras, PROHIBIDO volver a llamar get_session_state por tu
+      cuenta para dar otra actualización, sin importar cuánto tarde.
       PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla).
     - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
       e imagen van juntos a su correo. Ofrece explícitamente DOS opciones:
@@ -475,6 +516,14 @@ _FALLBACK_SESSION = {
     ),
     "title": "Huella Digital",
 }
+
+
+# Max seconds on_enter's warm-greeting generate_reply may block incoming
+# [pantalla:] screen cues before being force-interrupted. Independent of
+# (and much shorter than) the realtime model's own generate_reply_timeout,
+# which is sized for legitimate long turns elsewhere in the session, not
+# for this startup window. See on_enter() for the full rationale.
+ON_ENTER_MAX_WAIT_S = 12.0
 
 
 async def _load_session_state_for_enter() -> dict:
@@ -541,9 +590,17 @@ class Assistant(Agent):
     on_enter + generate_reply (Nova Sonic 2 mixed modalities).
     """
 
-    def __init__(self, on_enter_done: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        on_enter_done: asyncio.Event | None = None,
+        on_navigate: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(instructions=NOVA_INSTRUCTIONS)
         self._on_enter_done = on_enter_done
+        # Fires after a navigate_journey action succeeds — used to reset the
+        # "narrate once" pantalla guard for actions that legitimately revisit
+        # a phase already narrated this session (e.g. retake_photo → pose).
+        self._on_navigate = on_navigate
 
     async def on_enter(self) -> None:
         # Voice connects mid-journey (camera detect → identifying). Read the
@@ -581,12 +638,36 @@ class Assistant(Agent):
                 state.get("phase"),
             )
             handle = self.session.generate_reply(instructions=instructions)
-            await handle
+            # Bound how long on_enter can block incoming [pantalla:] cues.
+            # The realtime model's own generate_reply_timeout (45s) is far
+            # too long for this — it's sized for legitimate long turns
+            # elsewhere, not for the startup greeting. If the visitor's
+            # real screen moves on (e.g. identified in ~25s) while this
+            # first generate_reply is still stuck mid-flight, waiting the
+            # full 45s means the agent speaks ~45s of stale, ungrounded
+            # context while every real screen update is silently dropped
+            # (Nova Sonic path) or queued-but-delayed (Cartesia path).
+            # ON_ENTER_MAX_WAIT_S caps that blast radius: past this point,
+            # interrupt the stale greeting and let queued cues (see
+            # _replay_queued_pantalla) take over with fresh state.
+            try:
+                await asyncio.wait_for(
+                    handle.wait_for_playout(), timeout=ON_ENTER_MAX_WAIT_S
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "on_enter: generate_reply exceeded %.0fs (step=%s phase=%s) — "
+                    "interrupting stale greeting so queued screen updates can proceed",
+                    ON_ENTER_MAX_WAIT_S,
+                    state.get("step"),
+                    state.get("phase"),
+                )
+                handle.interrupt()
         finally:
-            # Signal that on_enter has fully completed (audio delivered).
-            # The pantalla guard (_on_enter_done event) will unblock any
-            # subsequent [pantalla:] cues only after this point, preventing
-            # the welcome greeting from being repeated.
+            # Signal that on_enter has fully completed (audio delivered, or
+            # force-interrupted above). The pantalla guard (_on_enter_done
+            # event) will unblock any subsequent [pantalla:] cues only after
+            # this point, preventing the welcome greeting from being repeated.
             if self._on_enter_done is not None:
                 self._on_enter_done.set()
 
@@ -644,7 +725,18 @@ class Assistant(Agent):
         payload: dict = {"action": action, "dimensionId": dimension_id}
         if index >= 0:
             payload["index"] = index
-        return await rpc("navigate_journey", payload)
+        result = await rpc("navigate_journey", payload)
+        if self._on_navigate is not None:
+            ok = True
+            try:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict) and "ok" in parsed:
+                    ok = bool(parsed["ok"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if ok:
+                self._on_navigate(action)
+        return result
 
     @function_tool
     async def fill_search(self, context: RunContext, query: str) -> str:
@@ -658,6 +750,25 @@ class Assistant(Agent):
         tiene efecto visible.
         """
         return await rpc("fill_search", {"query": query})
+
+    @function_tool
+    async def answer_seti_question(self, context: RunContext, query: str) -> str:
+        """Busca información oficial sobre SETI S.A.S. como empresa: identidad,
+        servicios (PRIME), clientes, alianzas/partners, casos de éxito, talento
+        o canales de contacto.
+
+        Llama esta herramienta cuando el visitante pregunte algo sobre SETI que
+        no esté ya cubierto por facts de get_session_state (por ejemplo: "¿qué
+        servicios ofrecen?", "¿quiénes son sus clientes?", "¿tienen casos de
+        éxito con IA?", "¿cómo los contacto?"). No inventes datos de SETI que
+        no vengan de esta herramienta o de facts — compón la respuesta con tus
+        propias palabras a partir del resultado.
+        """
+        try:
+            return search_seti_knowledge(query)
+        except Exception as exc:
+            logger.warning("answer_seti_question failed: %s", exc)
+            return "No pude consultar la base de conocimiento de SETI en este momento."
 
 
 # Backward-compatible names used by earlier deploys / tests.
@@ -841,14 +952,18 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "CLOSING PHOTO CONSENT — get_session_state. "
             "Pregunta en UNA frase natural si el visitante desea tomarse una foto para su tarjeta "
             "(la foto será la portada visual del informe). "
-            "Dos caminos: sí / quiero / adelante → navigate_journey(ready_for_picture) [genera tarjeta con foto]; "
-            "no / omitir / sin foto → navigate_journey(skip_photo) [arma la tarjeta igual, sin foto]. "
             "ESPERA su respuesta. PROHIBIDO avanzar sin confirmación. "
-            "Si los botones en pantalla ya respondieron, no preguntes de nuevo."
+            "Si los botones en pantalla ya respondieron, no preguntes de nuevo. "
+            "Cuando responda: sí / quiero / adelante → LLAMA navigate_journey(ready_for_picture) "
+            "PRIMERO, antes de decir cualquier cosa sobre colocarse frente al espejo — el tool "
+            "call es lo que realmente mueve la pantalla, tu voz sola NO la mueve. "
+            "no / omitir / sin foto → LLAMA navigate_journey(skip_photo) PRIMERO, antes de "
+            "confirmar nada. PROHIBIDO narrar el siguiente paso («colócate», «perfecto, "
+            "continuamos sin foto», etc.) sin haber llamado el tool correspondiente en ESE "
+            "mismo turno — narrar sin llamar el tool dejaría la pantalla sin avanzar aunque "
+            "tu voz suene como si ya hubiera pasado."
         )
-    if "closing:photo" in text or (
-        "step=closing" in text and "phase=pose" in text
-    ):
+    if "closing:photo" in text or ("step=closing" in text and "phase=pose" in text):
         return (
             "CLOSING PHOTO POSE — get_session_state. "
             "UNA locución: invita al visitante a colocarse frente al espejo para la foto. "
@@ -860,7 +975,11 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "CLOSING GENERATING — get_session_state. "
             "Locución CORTA (1-2 frases): componiendo tarjeta e informe para su correo. "
             "PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla). "
-            "PROHIBIDO repetir el mismo mensaje de entrega."
+            "Di esta locución UNA SOLA VEZ y luego SILENCIO — no la repitas ni "
+            "reformules con otras palabras («diseñando», «armando», «casi listo», etc.), "
+            "no vuelvas a llamar get_session_state por tu cuenta, no des más "
+            "actualizaciones de estado, sin importar cuánto tarde. Espera "
+            "[pantalla:closing:delivered]."
         )
     if "closing:delivered" in text:
         return (
@@ -873,9 +992,7 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Si confirma enviar: navigate_journey(advance). "
             "PROHIBIDO repetir frases ya dichas en generating o photo."
         )
-    if "closing:thanks" in text or (
-        "step=closing" in text and "phase=thanks" in text
-    ):
+    if "closing:thanks" in text or ("step=closing" in text and "phase=thanks" in text):
         return (
             "CLOSING THANKS — get_session_state. "
             "Agradecimiento cálido + invita a escanear el QR de SETI. "
@@ -885,6 +1002,50 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Si aún no confirmó: pregunta si finalizamos → ESPERA."
         )
     return None
+
+
+# Grace period to let an in-flight utterance finish naturally before
+# forcing new screen content through. Purely dynamic — checks whether the
+# agent is actually speaking right now (session.current_speech), not a
+# per-phase/per-cue allowlist. Previously the handler decided whether to
+# hard-interrupt by checking cue *type* (detail_auto / closing / etc.),
+# which meant every new screen category needed to be added to that list by
+# hand or it would chop off mid-sentence narration (e.g. analysis:complete
+# arriving while the scanning findings were still being read out). This
+# applies the same "let it finish, or bounded-timeout-interrupt" policy to
+# every cue uniformly, no matter which screen it's for.
+_PANTALLA_INTERRUPT_GRACE_S = 8.0
+
+# Keep strong refs to fire-and-forget wait-then-speak tasks so they can't be
+# garbage-collected mid-flight; each discards itself once done.
+_pending_pantalla_replies: set[asyncio.Task[None]] = set()
+
+
+def _deliver_pantalla_reply(agent_session: AgentSession, instructions: str) -> None:
+    """Speak `instructions` now if the agent is idle, or once the in-flight
+    utterance finishes — bounded wait, then force-interrupt if it runs long."""
+    current = agent_session.current_speech
+    if current is None or current.done():
+        agent_session.generate_reply(instructions=instructions)
+        return
+
+    async def _wait_then_speak() -> None:
+        try:
+            await asyncio.wait_for(
+                current.wait_for_playout(), timeout=_PANTALLA_INTERRUPT_GRACE_S
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "[text_input] In-flight speech exceeded %.0fs — interrupting "
+                "for new screen content",
+                _PANTALLA_INTERRUPT_GRACE_S,
+            )
+            current.interrupt()
+        agent_session.generate_reply(instructions=instructions)
+
+    task = asyncio.create_task(_wait_then_speak())
+    _pending_pantalla_replies.add(task)
+    task.add_done_callback(_pending_pantalla_replies.discard)
 
 
 def _telemetry_record_option() -> bool | dict[str, bool]:
@@ -971,6 +1132,25 @@ async def my_agent(ctx: JobContext):
         assert isinstance(once, set)
         once.add(key)
 
+    def _forget_pantalla_narrated(key: str) -> None:
+        once = _pantalla_guard["once_keys"]
+        assert isinstance(once, set)
+        once.discard(key)
+
+    def _on_navigate_action(action: str) -> None:
+        # retake_photo sends the visitor back to closing:pose, which shares
+        # the "closing:photo" once-only dedupe key with the first pass
+        # through that phase. Without this reset, the pose narration is
+        # silently skipped on every retake — the visitor hears nothing,
+        # asks again, and the model (with nothing new to react to) can
+        # start improvising a "photo captured, sending now" outcome that
+        # never actually happened while the UI is still sitting on pose.
+        if action == "retake_photo":
+            _forget_pantalla_narrated("closing:photo")
+            logger.info(
+                "[navigate_journey] retake_photo — reset closing:photo pantalla guard"
+            )
+
     def _should_skip_duplicate_pantalla(key: str) -> bool:
         now = time.monotonic()
         last_key = _pantalla_guard["last_key"]
@@ -988,17 +1168,20 @@ async def my_agent(ctx: JobContext):
     ) -> None:
         is_pantalla = event.text.startswith("[pantalla:")
         if is_pantalla and not _on_enter_done.is_set():
-            if use_cartesia:
-                _pantalla_queue.append(event.text)
-                logger.info(
-                    "[text_input] Queued pantalla cue (on_enter active): %.80s",
-                    event.text,
-                )
-            else:
-                logger.info(
-                    "[text_input] Suppressing pantalla cue (on_enter still active): %.80s",
-                    event.text,
-                )
+            # Queue rather than drop, for both backends. Previously Nova
+            # Sonic sessions dropped cues that arrived here outright — if
+            # on_enter's generate_reply ran long (it's now bounded by
+            # ON_ENTER_MAX_WAIT_S, but was previously bounded only by the
+            # realtime model's 45s generate_reply_timeout), any real screen
+            # change during that window was lost for good, leaving the
+            # agent to finish speaking stale, ungrounded context. Queueing
+            # means _replay_queued_pantalla always catches the visitor up
+            # once on_enter finishes or is force-interrupted.
+            _pantalla_queue.append(event.text)
+            logger.info(
+                "[text_input] Queued pantalla cue (on_enter active): %.80s",
+                event.text,
+            )
             return
         # CRITICAL: never pass the raw [pantalla:] English cue as user_input —
         # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
@@ -1018,8 +1201,7 @@ async def my_agent(ctx: JobContext):
                 return
 
             intro_orchestrator_start = (
-                "INTRO_ORCHESTRATOR_START" in event.text
-                or "intro:run" in event.text
+                "INTRO_ORCHESTRATOR_START" in event.text or "intro:run" in event.text
             )
             detail_revisit = (
                 "detail:revisit" in event.text or "DETAIL_REVISIT" in event.text
@@ -1031,19 +1213,11 @@ async def my_agent(ctx: JobContext):
                 or "step=detail" in event.text
                 or "focus=detail" in event.text
             )
-            welcome_ready = (
-                "[pantalla:welcome:ready]" in event.text
-                or (
-                    "phase=ready" in event.text
-                    and "welcome" in event.text
-                )
+            welcome_ready = "[pantalla:welcome:ready]" in event.text or (
+                "phase=ready" in event.text and "welcome" in event.text
             )
-            welcome_preparing = (
-                "[pantalla:welcome:preparing]" in event.text
-                or (
-                    "phase=preparing" in event.text
-                    and "welcome" in event.text
-                )
+            welcome_preparing = "[pantalla:welcome:preparing]" in event.text or (
+                "phase=preparing" in event.text and "welcome" in event.text
             )
             closing_instructions = _closing_pantalla_instructions(event.text)
 
@@ -1056,9 +1230,7 @@ async def my_agent(ctx: JobContext):
 
             if intro_orchestrator_start:
                 if schedule_intro_tour(agent_session):
-                    logger.info(
-                        "[text_input] intro orchestrator started from pantalla"
-                    )
+                    logger.info("[text_input] intro orchestrator started from pantalla")
                 else:
                     logger.info(
                         "[text_input] intro orchestrator already active — "
@@ -1077,55 +1249,50 @@ async def my_agent(ctx: JobContext):
                 )
                 return
 
-            # closing pantalla cues arrive immediately after a navigate_journey call
-            # (e.g. send_report → photo_consent). The agent is likely still speaking
-            # the previous confirmation. Do NOT interrupt — let it finish, then the
-            # generate_reply below will queue the photo-consent question naturally.
-            is_closing_cue = closing_instructions is not None
-            if not detail_auto and not welcome_preparing and not is_closing_cue:
-                agent_session.interrupt()
-
+            # Whether to speak immediately or let an in-flight utterance finish
+            # first is decided dynamically by _deliver_pantalla_reply (checks
+            # agent_session.current_speech) — not by cue type. No hardcoded
+            # per-phase exemption list to maintain as new screens are added.
             if detail_revisit:
-                agent_session.generate_reply(
-                    instructions=(
-                        "DETAIL_REVISIT — Esta dimensión ya se narró. "
-                        "PROHIBIDO repetir evidencia/brechas/tácticas. "
-                        "PROHIBIDO present_content(detail_section). "
-                        "Di UNA frase breve: informe, volver al globo u otra dimensión → ESPERA. "
-                        "send_report | back | open_detail(dimension_id=…)."
-                    ),
+                _deliver_pantalla_reply(
+                    agent_session,
+                    "DETAIL_REVISIT — Esta dimensión ya se narró. "
+                    "PROHIBIDO repetir evidencia/brechas/tácticas. "
+                    "PROHIBIDO present_content(detail_section). "
+                    "Di UNA frase breve: informe, volver al globo u otra dimensión → ESPERA. "
+                    "send_report | back | open_detail(dimension_id=…).",
                 )
             elif detail_auto:
-                agent_session.generate_reply(
-                    instructions=(
-                        "DETAIL_CONTINUOUS — UNA sola respuesta SIN silencios ni pausas. "
-                        "Teje facts.evidence → facts.gaps → facts.tactics en prosa encadenada. "
-                        "Parafrasea para facts.role en facts.company — explica POR QUÉ. "
-                        "PROHIBIDO parar, callar o END entre bloques o ítems. "
-                        "PROHIBIDO present_content extra ni get_session_state entre bloques. "
-                        "PROHIBIDO rótulos Fortalezas/Oportunidades/Plan. "
-                        "UI resalta secciones sola — tú sigues hablando sin interrupción. "
-                        "Al cerrar tácticas: pregunta informe / volver / otra dimensión → PARA y ESPERA."
-                    ),
+                _deliver_pantalla_reply(
+                    agent_session,
+                    "DETAIL_CONTINUOUS — UNA sola respuesta SIN silencios ni pausas. "
+                    "Teje facts.evidence → facts.gaps → facts.tactics en prosa encadenada. "
+                    "Parafrasea para facts.role en facts.company — explica POR QUÉ. "
+                    "PROHIBIDO parar, callar o END entre bloques o ítems. "
+                    "PROHIBIDO present_content extra ni get_session_state entre bloques. "
+                    "PROHIBIDO rótulos Fortalezas/Oportunidades/Plan. "
+                    "UI resalta secciones sola — tú sigues hablando sin interrupción. "
+                    "Al cerrar tácticas: pregunta informe / volver / otra dimensión → PARA y ESPERA.",
                 )
             elif welcome_ready:
-                agent_session.generate_reply(
-                    instructions=(
-                        "WELCOME READY — PASO 1: "
-                        "Llama get_session_state AHORA MISMO antes de hablar. "
-                        "Usa facts.name, facts.role y facts.company del resultado para componer "
-                        "UN saludo propio en español natural (~10-12 s). "
-                        "PROHIBIDO ABSOLUTO: leer en voz alta texto entre corchetes como [nombre], "
-                        "[rol], [empresa] o cualquier otro placeholder — son variables internas, NUNCA se dicen. "
-                        "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
-                        "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
-                        "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
-                        "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
-                        "PARA y espera confirmación del visitante. "
-                        "PASO 2 — solo cuando confirme (sí / continuar / adelante / vamos / dale): "
-                        "llama navigate_journey(start_experience) en ese turno — nunca junto al saludo. "
-                        "Tras ok: SILENCIO TOTAL — no repitas el saludo; espera [pantalla:intro]."
-                    ),
+                _deliver_pantalla_reply(
+                    agent_session,
+                    "WELCOME READY — PASO 1: "
+                    "Llama get_session_state AHORA MISMO antes de hablar. "
+                    "Usa facts.name, facts.role y facts.company del resultado para componer "
+                    "UN saludo propio en español natural (~10-12 s). "
+                    "PROHIBIDO ABSOLUTO: leer en voz alta texto entre corchetes como [nombre], "
+                    "[rol], [empresa] o cualquier otro placeholder — son variables internas, NUNCA se dicen. "
+                    "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
+                    "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
+                    "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
+                    "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
+                    "PARA y espera confirmación del visitante. "
+                    "PASO 2 — solo cuando confirme (sí / continuar / adelante / vamos / dale): "
+                    "llama navigate_journey(start_experience) en ese turno — nunca junto al saludo. "
+                    "Tras ok: NO digas nada más en este turno — ni el saludo, ni "
+                    "palabras como «silencio» o «esperando», ni ningún comentario "
+                    "de cierre. Deja que [pantalla:intro] continúe sola.",
                 )
             elif closing_instructions:
                 once_key = dedupe_key
@@ -1135,7 +1302,7 @@ async def my_agent(ctx: JobContext):
                     )
                     return
                 _mark_pantalla_narrated(once_key)
-                agent_session.generate_reply(instructions=closing_instructions)
+                _deliver_pantalla_reply(agent_session, closing_instructions)
             elif dedupe_key == "analysis:complete" and _pantalla_already_narrated(
                 "analysis:complete"
             ):
@@ -1144,14 +1311,13 @@ async def my_agent(ctx: JobContext):
             else:
                 if dedupe_key == "analysis:complete":
                     _mark_pantalla_narrated("analysis:complete")
-                agent_session.generate_reply(
-                    instructions=(
-                        "Cambio de foco en pantalla. "
-                        "Llama get_session_state primero — ancla en step/phase actuales. "
-                        "Luego present_content solo si hace falta. "
-                        "PROHIBIDO repetir la misma locución si ya cubriste este phase. "
-                        "PROHIBIDO UI/pantalla/tarjeta meta."
-                    ),
+                _deliver_pantalla_reply(
+                    agent_session,
+                    "Cambio de foco en pantalla. "
+                    "Llama get_session_state primero — ancla en step/phase actuales. "
+                    "Luego present_content solo si hace falta. "
+                    "PROHIBIDO repetir la misma locución si ya cubriste este phase. "
+                    "PROHIBIDO UI/pantalla/tarjeta meta.",
                 )
         else:
             transcript = event.text.strip()
@@ -1284,7 +1450,7 @@ async def my_agent(ctx: JobContext):
     )
 
     await session.start(
-        agent=Assistant(on_enter_done=_on_enter_done),
+        agent=Assistant(on_enter_done=_on_enter_done, on_navigate=_on_navigate_action),
         room=ctx.room,
         room_options=room_opts,
         record=_telemetry_record_option(),
