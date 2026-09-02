@@ -7,6 +7,7 @@ from livekit.agents import inference, llm
 import agent as agent_module
 from agent import (
     _GENERATING_SETI_FACTS,
+    _PANTALLA_INTERRUPT_GRACE_S,
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
@@ -387,6 +388,32 @@ def test_generating_keepalive_never_repeats_and_never_claims_completion() -> Non
     # Cycling past the end of the list wraps around rather than crashing.
     wrapped = _generating_keepalive_instructions(len(_GENERATING_SETI_FACTS))
     assert _GENERATING_SETI_FACTS[0] in wrapped
+
+
+def test_generating_keepalive_grace_period_covers_longest_fact() -> None:
+    """Regression (2026-09-02, RM_3HK2n8CFPegT logs): the closing:delivered
+    handoff force-interrupted an in-flight SETI fact mid-word
+    ("...bajo el propósito «Crecemos para") because the shared pantalla
+    grace period (8s) was sized for the old one-line filler, not these
+    longer grounded facts. Guards against the grace period regressing
+    below what the longest fact needs at a conservative spoken pace, and
+    against reintroducing the verbose transition preamble that pushed the
+    original line over budget.
+    """
+    # Conservative: slower than the ~3.25 words/s implied by the incident
+    # (26 words spoken in the 8s before the cut), so this is a safety
+    # margin check, not a tight fit.
+    words_per_second = 2.5
+    longest_fact_words = max(len(fact.split()) for fact in _GENERATING_SETI_FACTS)
+    # +6 words of headroom for whatever short lead-in the model adds.
+    estimated_seconds = (longest_fact_words + 6) / words_per_second
+    assert estimated_seconds <= _PANTALLA_INTERRUPT_GRACE_S
+
+    # The instructions must no longer suggest the long transition preamble
+    # that ate into the speaking budget in the incident.
+    instructions = _generating_keepalive_instructions(0)
+    assert "mientras se termina de armar tu tarjeta" not in instructions.lower()
+    assert "sin preámbulos largos" in instructions
 
 
 @pytest.mark.asyncio

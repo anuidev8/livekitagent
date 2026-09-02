@@ -1165,18 +1165,17 @@ def _generating_keepalive_instructions(tick: int) -> str:
     fact = _GENERATING_SETI_FACTS[tick % len(_GENERATING_SETI_FACTS)]
     return (
         "CLOSING GENERATING — la tarjeta sigue en proceso, el visitante "
-        "sigue esperando. Locución MUY corta (1 frase), en tus propias "
-        "palabras, DISTINTA a cualquier frase ya dicha en esta fase "
-        "(incluida la primera locución al entrar a esta pantalla) — "
+        "sigue esperando. Locución MUY corta (1 frase, sin preámbulos "
+        "largos — ve directo al dato, sin frases de relleno antes), en tus "
+        "propias palabras, DISTINTA a cualquier frase ya dicha en esta "
+        "fase (incluida la primera locución al entrar a esta pantalla) — "
         "PROHIBIDO repetir o reformular algo ya dicho. Usa este dato real "
         "de SETI como contenido, parafraseado, breve, tono cálido, NUNCA "
-        f"leído literal: «{fact}» Enlázalo con una transición breve tipo "
-        "«mientras se termina de armar tu tarjeta…». PROHIBIDO ABSOLUTO "
-        "decir o insinuar que la tarjeta o el informe YA están listos, "
-        "generados o pueden enviarse — eso solo es cierto cuando llegue de "
-        "verdad [pantalla:closing:delivered]. Tras decirla, SILENCIO otra "
-        "vez hasta la próxima actualización o hasta que llegue esa "
-        "pantalla."
+        f"leído literal: «{fact}» PROHIBIDO ABSOLUTO decir o insinuar que "
+        "la tarjeta o el informe YA están listos, generados o pueden "
+        "enviarse — eso solo es cierto cuando llegue de verdad "
+        "[pantalla:closing:delivered]. Tras decirla, SILENCIO otra vez "
+        "hasta la próxima actualización o hasta que llegue esa pantalla."
     )
 
 
@@ -1190,7 +1189,15 @@ def _generating_keepalive_instructions(tick: int) -> str:
 # arriving while the scanning findings were still being read out). This
 # applies the same "let it finish, or bounded-timeout-interrupt" policy to
 # every cue uniformly, no matter which screen it's for.
-_PANTALLA_INTERRUPT_GRACE_S = 8.0
+#
+# Regression (2026-09-02, RM_3HK2n8CFPegT logs): a closing:generating SETI
+# fact filler (~9-11s to speak at Nova's pace) was still mid-sentence when
+# closing:delivered landed a few seconds in. The old 8s grace period cut it
+# off mid-word ("...bajo el propósito «Crecemos para" — never finished
+# "nuestros clientes»"). 8s was sized for the old one-line "componiendo tu
+# tarjeta" filler, not the longer grounded facts added afterward. Bumped
+# with headroom for the longest fact + a short lead-in at natural pace.
+_PANTALLA_INTERRUPT_GRACE_S = 12.0
 
 # Keep strong refs to fire-and-forget wait-then-speak tasks so they can't be
 # garbage-collected mid-flight; each discards itself once done.
