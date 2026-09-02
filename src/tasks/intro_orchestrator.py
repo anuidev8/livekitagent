@@ -67,7 +67,7 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
             session,
             segment_id="intro_tour",
             instructions=(
-                "Entrega UNA sola locución natural de máximo 28 segundos, sin herramientas "
+                "Entrega UNA sola locución natural de máximo 30 segundos, sin herramientas "
                 "ni pausas largas. PROHIBIDO abrir anunciando lo que vas a hacer «ahora te "
                 "explico», «vamos a ver cómo funciona», «te cuento el onboarding» y similares "
                 "— PROHIBIDO decir la palabra 'onboarding'. Entra DIRECTO al contenido, "
@@ -76,6 +76,10 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 "PROHIBIDO ABSOLUTO mencionar 'pulgar arriba' en esta primera frase de "
                 "gestos — esa mención va SOLO más adelante, junto con las dimensiones, "
                 "nunca antes. "
+                "Antes de nombrarlas, agrega UNA frase muy breve que enmarque qué son "
+                "las dimensiones en conjunto — por ejemplo, que vas a medir su presencia "
+                "digital en cinco dimensiones distintas — sin explicar el concepto a "
+                "fondo, solo dar ese contexto antes de nombrarlas una por una. "
                 "Menciona las cinco dimensiones, cada una con una idea MUY corta (3-5 "
                 "palabras, no una oración completa) de qué mide — no las enumeres con "
                 "números ni las expliques a fondo, solo nómbralas con esa idea breve: "

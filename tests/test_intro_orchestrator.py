@@ -32,6 +32,16 @@ async def test_intro_tour_waits_for_current_turn_then_uses_one_uninterrupted_rep
     assert "LinkedIn SSI" in kwargs["instructions"]
     assert "radar personalizado" in kwargs["instructions"]
     assert "¿Empezamos el análisis?" in kwargs["instructions"]
+    # Regression: a real session (2026-09-02 09:20 logs) had the narration
+    # jump straight from gestures into naming dimensions — "Autoridad: tu
+    # visibilidad en Google. LinkedIn SSI: ..." — with no framing sentence
+    # explaining what a "dimension" even is. Require a short lead-in,
+    # positioned before the dimension names, that frames the five
+    # dimensions as a group before naming them one by one.
+    idx_frame = kwargs["instructions"].find("cinco dimensiones distintas")
+    idx_autoridad = kwargs["instructions"].find("Autoridad")
+    assert idx_frame != -1
+    assert idx_frame < idx_autoridad
 
 
 @pytest.mark.asyncio
