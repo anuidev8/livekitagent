@@ -13,6 +13,7 @@ from agent import (
     NOVA_TURN_DETECTION,
     Assistant,
     NovaAssistant,
+    _closing_pantalla_instructions,
     _deliver_pantalla_reply,
     _pending_pantalla_replies,
     build_on_enter_instructions,
@@ -94,6 +95,10 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     # confidently from what the tool did return.
     assert "respuesta de la herramienta es incompleta" in nova_lower
     assert "answer_seti_question" in nova_lower
+    # The visitor may ask broadly ("cuéntame de SETI") or narrowly ("qué
+    # bancos son clientes"); the guide should lead with the six-area summary
+    # only for the broad case, and go straight to detail for the narrow one.
+    assert "resumen general" in nova_lower
 
 
 def test_analysis_task_is_focused() -> None:
@@ -269,6 +274,57 @@ async def test_deliver_pantalla_reply_force_interrupts_after_grace_period() -> N
 
     handle.interrupt.assert_called_once()
     session.generate_reply.assert_called_once_with(instructions="contenido urgente")
+
+
+def test_photo_consent_question_voices_the_decline_option() -> None:
+    """User feedback: the agent only asked about taking a photo out loud —
+    visitors who wanted to skip only found out that was possible from the
+    on-screen buttons, never from what the agent said. The spoken question
+    must mention BOTH options, not just the "yes, take a photo" branch."""
+    consent = _closing_pantalla_instructions(
+        "[pantalla:closing:photo_consent] step=closing phase=photo_consent"
+    )
+    assert consent is not None
+    idx_question = consent.find("Pregunta")
+    idx_no_branch = consent.find("no / omitir")
+    assert idx_question != -1 and idx_no_branch != -1
+    question_guidance = consent[idx_question:idx_no_branch]
+    assert "sin foto" in question_guidance or "prefiere" in question_guidance.lower()
+
+    idx_q = NOVA_INSTRUCTIONS.find("¿Quieres tomarte")
+    assert idx_q != -1
+    quoted_end = NOVA_INSTRUCTIONS.find("»", idx_q)
+    quoted_question = NOVA_INSTRUCTIONS[idx_q:quoted_end]
+    assert "sin foto" in quoted_question
+
+
+def test_closing_thanks_finish_tool_called_before_farewell_speech() -> None:
+    """Regression: a real session (2026-09-02 08:16 logs) showed the visitor
+    say "finalizar" four separate times in a row and navigate_journey(finish)
+    never fired once. Root cause: both instruction sites told the model to
+    speak the farewell line THEN call the tool. Nova Sonic's own barge-in
+    detection kept cutting the generation off mid-farewell (the impatient
+    visitor talking over it, since nothing visibly happened yet) before the
+    trailing tool call was ever reached. The fix mirrors the existing
+    photo_consent "LLAMA ... PRIMERO" pattern: tool call before speech, so a
+    barge-in after the tool call already fired can no longer swallow it.
+    """
+    thanks = _closing_pantalla_instructions(
+        "[pantalla:closing:thanks] step=closing phase=thanks"
+    )
+    assert thanks is not None
+    assert "navigate_journey(finish)" in thanks
+    assert "PRIMERO" in thanks
+    # The old buggy ordering must not reappear.
+    assert "despedida y navigate_journey(finish)" not in thanks
+
+    nova = NOVA_INSTRUCTIONS
+    assert "despedida y navigate_journey(finish)" not in nova
+    idx = nova.find("confirmen salir")
+    assert idx != -1
+    snippet = nova[idx : idx + 260]
+    assert "navigate_journey(finish)" in snippet
+    assert "PRIMERO" in snippet
 
 
 @pytest.mark.asyncio

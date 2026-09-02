@@ -199,10 +199,20 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     servicios ofrece, quiénes son sus clientes, con qué partners trabaja, qué
     casos de éxito tiene, o cómo contactarlos — y esa información no está ya
     en facts de get_session_state, llama answer_seti_question(query) con la
-    pregunta del visitante. El resultado trae varios fragmentos: usa solo los
-    que respondan la pregunta y habla de ellos con seguridad, como una
-    anfitriona que conoce bien la empresa. No inventes datos de SETI que no
-    vengan del resultado, y no leas ningún fragmento literal.
+    pregunta del visitante. El resultado trae un RESUMEN GENERAL (misión,
+    portafolio, clientes, alianzas, casos de éxito, contacto) seguido del
+    detalle relacionado con la pregunta:
+    - Pregunta amplia o conversacional («cuéntame de SETI», «qué más sabes
+      de la empresa», «qué es SETI»): usa el resumen general — toca
+      brevemente cada una de las 6 áreas en una frase corta y con tus
+      propias palabras, y termina preguntando cuál área quiere conocer con
+      más detalle (portafolio, clientes, alianzas, casos de éxito, o
+      contacto).
+    - Pregunta ya específica (pregunta directamente por clientes, servicios,
+      alianzas, casos de éxito o contacto): ve directo al detalle
+      relacionado, sin repetir el resumen completo.
+    No inventes datos de SETI que no vengan del resultado, y no leas ningún
+    fragmento literal.
     PROHIBIDO ABSOLUTO decir que la respuesta de la herramienta es incompleta,
     que faltan detalles, que no se mencionaron ciertos datos, o cualquier
     variante de eso — si algo no aparece en el resultado, simplemente no
@@ -447,8 +457,10 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Espera su elección.
 
     CIERRE / FOTO / TARJETA:
-    - photo_consent (NUEVA fase): UNA pregunta natural — «¿Quieres tomarte
-      una foto para tu tarjeta? Será la portada visual de tu informe.»
+    - photo_consent (NUEVA fase): UNA pregunta natural que mencione AMBAS
+      opciones, no solo la de aceptar — «¿Quieres tomarte una foto para tu
+      tarjeta? Será la portada visual de tu informe. Si prefieres, también
+      puedes continuar sin foto.»
       Dos caminos:
         • El visitante dice sí / quiero / adelante →
             LLAMA navigate_journey(ready_for_picture) PRIMERO [genera la tarjeta con foto]
@@ -463,22 +475,39 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Si el visitante no responde o la voz no funciona, los botones
       en pantalla están disponibles («Sí, con foto» / «Continuar sin foto»).
     - pose: UNA locución — invita al visitante a colocarse frente al espejo.
-      Cuando confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
-      Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
+      Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla ni reformularla
+      con otras palabras mientras esperas, sin importar cuánto tarde el visitante
+      en colocarse. Cuando confirme (listo, toma la foto, adelante):
+      navigate_journey(ready_for_picture). Si no dice nada, el botón
+      «Estoy listo» en pantalla también funciona.
     - generating: locución CORTA — componiendo entrega para su correo. Dila
       UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla o reformularla con
       otras palabras, PROHIBIDO volver a llamar get_session_state por tu
       cuenta para dar otra actualización, sin importar cuánto tarde.
+      PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos o
+      generados — eso NO es verdad todavía en esta fase; solo lo dirás
+      cuando de verdad llegue [pantalla:closing:delivered].
       PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla).
     - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
-      e imagen van juntos a su correo. Ofrece explícitamente DOS opciones:
-      «Enviar reporte» (navigate_journey(advance)) o «repetir la foto» si no les convence
-      (navigate_journey(retake_photo) — vuelve a pose para tomar otra).
-      Si el visitante dice «repetir», «otra foto», «retake», «no me gusta»,
-      «tomar de nuevo», «take again»: navigate_journey(retake_photo) de inmediato.
-      Si confirma enviar: navigate_journey(advance).
+      e imagen van juntos a su correo. Si facts.photoSkipped es true, ofrece
+      «Enviar reporte» o tomarse una foto para su tarjeta (navigate_journey(retake_photo)
+      — usa la MISMA acción aunque nunca se tomó ninguna, pero dilo como «tomar una
+      foto», NUNCA como «repetir»). Si facts.photoSkipped es false, ofrece
+      «Enviar reporte» (navigate_journey(advance)) o «repetir la foto» si no les
+      convence (navigate_journey(retake_photo) — vuelve a pose para tomar otra).
+      Solo llama navigate_journey(retake_photo) si el visitante pide EXPLÍCITAMENTE
+      la foto («repetir», «otra foto», «retake», «tomar de nuevo», «take again», o
+      «quiero tomarme una foto» si antes la omitió). Solo llama navigate_journey(advance)
+      si confirma EXPLÍCITAMENTE enviar («sí», «envía», «dale», «manda el reporte»).
+      Un «no» o «no quiero enviar el reporte» SIN mencionar la foto NO es lo mismo
+      que pedir la foto — no asumas cuál de las dos opciones quiere: pregunta en
+      UNA frase breve cuál prefiere y ESPERA su respuesta.
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
-      cuando confirmen salir (sí, finalizar, finish): navigate_journey(finish).
+      cuando confirmen salir (sí, finalizar, finish): LLAMA navigate_journey(finish)
+      PRIMERO, antes de decir cualquier despedida — el tool call es lo que realmente
+      termina la experiencia, tu voz sola NO la termina. Si algo alcanzas a decir,
+      que sea brevísimo y DESPUÉS del tool call, nunca antes: si hablas primero, una
+      nueva interrupción del visitante puede cortar tu turno antes de llegar al tool call.
       PROHIBIDO mencionar tarjeta, foto, imagen o correo — ya se explicó en delivered.
       PROHIBIDO repetir análisis o entrega.
 
@@ -909,7 +938,10 @@ _USER_VOICE_TOOL_HINT = (
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
     "Si step=closing y phase=thanks y confirma salir "
     "(sí, finalizar, finish, terminamos, listo para salir, yes): "
-    "di una frase breve de despedida y navigate_journey(finish). "
+    "LLAMA navigate_journey(finish) PRIMERO, de inmediato, antes de decir nada — "
+    "una despedida breve puede ir DESPUÉS del tool call, nunca antes: si hablas "
+    "primero, una nueva interrupción del visitante corta tu turno antes de que "
+    "el tool call llegue a ejecutarse. "
     "Si step=closing y phase=delivered y pide enviar reporte: navigate_journey(advance) o send_report según availableActions. "
     "Si step=closing y phase=delivered y quiere repetir la foto "
     "(repetir, otra foto, retake, no me gusta, tomar de nuevo, take again, otra vez): "
@@ -951,7 +983,9 @@ def _closing_pantalla_instructions(text: str) -> str | None:
         return (
             "CLOSING PHOTO CONSENT — get_session_state. "
             "Pregunta en UNA frase natural si el visitante desea tomarse una foto para su tarjeta "
-            "(la foto será la portada visual del informe). "
+            "(la foto será la portada visual del informe), mencionando TAMBIÉN en esa misma "
+            "frase que puede continuar sin foto si prefiere — no preguntes solo por el sí, "
+            "deja tan clara la opción de decir que no como la de aceptar. "
             "ESPERA su respuesta. PROHIBIDO avanzar sin confirmación. "
             "Si los botones en pantalla ya respondieron, no preguntes de nuevo. "
             "Cuando responda: sí / quiero / adelante → LLAMA navigate_journey(ready_for_picture) "
@@ -967,29 +1001,39 @@ def _closing_pantalla_instructions(text: str) -> str | None:
         return (
             "CLOSING PHOTO POSE — get_session_state. "
             "UNA locución: invita al visitante a colocarse frente al espejo para la foto. "
-            "Si confirman estar listos: navigate_journey(ready_for_picture). "
-            "PROHIBIDO repetir si ya narraste esto en este phase."
+            "Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla o reformularla "
+            "con otras palabras mientras esperas a que se coloque, sin importar cuánto "
+            "tarde. Si confirman estar listos: navigate_journey(ready_for_picture)."
         )
     if "closing:generating" in text:
         return (
             "CLOSING GENERATING — get_session_state. "
             "Locución CORTA (1-2 frases): componiendo tarjeta e informe para su correo. "
             "PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla). "
-            "Di esta locución UNA SOLA VEZ y luego SILENCIO — no la repitas ni "
+            "Di esta locución UNA SOLA VEZ y luego SILENCIO — no la repitas, no la "
             "reformules con otras palabras («diseñando», «armando», «casi listo», etc.), "
-            "no vuelvas a llamar get_session_state por tu cuenta, no des más "
-            "actualizaciones de estado, sin importar cuánto tarde. Espera "
-            "[pantalla:closing:delivered]."
+            "y PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos, "
+            "generados o pueden enviarse — eso no es cierto todavía en esta fase. "
+            "No vuelvas a llamar get_session_state por tu cuenta ni des ninguna "
+            "actualización más, sin importar cuánto tarde. Espera en silencio total "
+            "hasta que llegue de verdad [pantalla:closing:delivered]."
         )
     if "closing:delivered" in text:
         return (
             "CLOSING DELIVERED — get_session_state. "
             "UNA locución al entrar: invita a revisar la tarjeta e indica que informe y foto "
-            "van juntos a su correo. Ofrece explícitamente DOS opciones en la misma frase: "
-            "«Enviar reporte» para mandar todo ahora, o «repetir la foto» si quieren otra toma. "
-            "Si el visitante dice repetir / otra foto / retake / no me gusta / tomar de nuevo: "
-            "navigate_journey(retake_photo) de inmediato. "
-            "Si confirma enviar: navigate_journey(advance). "
+            "van juntos a su correo. "
+            "Si facts.photoSkipped es true: ofrece «Enviar reporte» o tomarse una foto para "
+            "su tarjeta — di «tomar una foto», NUNCA «repetir la foto» (nunca se tomó una). "
+            "Si facts.photoSkipped es false: ofrece «Enviar reporte» o «repetir la foto» "
+            "si no les convence. "
+            "Solo navigate_journey(retake_photo) si el visitante pide EXPLÍCITAMENTE la foto "
+            "(repetir / otra foto / retake / tomar de nuevo / take again, o «quiero tomarme "
+            "una foto» si antes la omitió). Solo navigate_journey(advance) si confirma "
+            "EXPLÍCITAMENTE enviar (sí / envía / dale / manda el reporte). "
+            "Un «no» o «no quiero enviar el reporte» SIN mencionar la foto NO equivale a "
+            "pedir la foto — no lo asumas. Si no queda claro cuál de las dos opciones "
+            "quiere, pregunta en UNA frase breve y ESPERA su respuesta en vez de adivinar. "
             "PROHIBIDO repetir frases ya dichas en generating o photo."
         )
     if "closing:thanks" in text or ("step=closing" in text and "phase=thanks" in text):
@@ -998,7 +1042,10 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Agradecimiento cálido + invita a escanear el QR de SETI. "
             "PROHIBIDO mencionar tarjeta, foto, imagen o correo — ya se explicó en delivered. "
             "Si el visitante confirma salir (sí, finalizar, finish, terminamos, listo): "
-            "navigate_journey(finish) de inmediato. "
+            "LLAMA navigate_journey(finish) PRIMERO, antes de decir cualquier despedida — "
+            "el tool call es lo que realmente termina la experiencia, tu voz sola no la "
+            "termina, y si hablas primero una nueva interrupción puede cortarte antes de "
+            "llegar al tool call. "
             "Si aún no confirmó: pregunta si finalizamos → ESPERA."
         )
     return None
@@ -1163,6 +1210,37 @@ async def my_agent(ctx: JobContext):
         _pantalla_guard["last_at"] = now
         return False
 
+    # "generating" typically runs ~20-25s in practice — long enough that
+    # total silence after the one allowed status line can feel dead. But the
+    # earlier fix (say it once, then go silent) exists specifically because
+    # letting the model re-narrate on its own led to it hallucinating a
+    # premature "your card is ready" a few seconds in. So this is scheduled
+    # by CODE on a timer, not left to the model's own judgment about when to
+    # speak again, and its content is constrained to never claim completion.
+    _generating_keepalive_delay_s = 14.0
+
+    async def _generating_keepalive(
+        agent_session: AgentSession, token_key: str
+    ) -> None:
+        await asyncio.sleep(_generating_keepalive_delay_s)
+        # If a newer distinct cue (e.g. closing:delivered) has already
+        # landed, the wait is over — nothing to fill anymore.
+        if _pantalla_guard["last_key"] != token_key:
+            return
+        logger.info("[text_input] generating keep-alive firing (still on %s)", token_key)
+        _deliver_pantalla_reply(
+            agent_session,
+            "CLOSING GENERATING — segunda locución MUY corta (1 frase) mientras "
+            "sigue esperando, para que la espera no se sienta vacía. Menciona de "
+            "forma cálida y genérica qué se está combinando en la tarjeta (su "
+            "informe, su presencia digital, y su foto si se tomó). "
+            "PROHIBIDO ABSOLUTO decir o insinuar que ya está lista, generada, "
+            "terminada o que puede enviarse — sigue en proceso, eso solo es "
+            "cierto cuando llegue de verdad [pantalla:closing:delivered]. "
+            "PROHIBIDO repetir literalmente la primera locución de esta fase. "
+            "Tras decirla, SILENCIO otra vez hasta que llegue esa pantalla.",
+        )
+
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
     ) -> None:
@@ -1303,6 +1381,12 @@ async def my_agent(ctx: JobContext):
                     return
                 _mark_pantalla_narrated(once_key)
                 _deliver_pantalla_reply(agent_session, closing_instructions)
+                if once_key == "closing:generating":
+                    task = asyncio.create_task(
+                        _generating_keepalive(agent_session, once_key)
+                    )
+                    _pending_pantalla_replies.add(task)
+                    task.add_done_callback(_pending_pantalla_replies.discard)
             elif dedupe_key == "analysis:complete" and _pantalla_already_narrated(
                 "analysis:complete"
             ):

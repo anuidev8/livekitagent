@@ -51,6 +51,31 @@ def test_broad_conversational_query_grounds_in_core_identity() -> None:
     )
 
 
+def test_every_answer_includes_the_six_area_overview() -> None:
+    """The visitor may ask broadly ("cuéntame de SETI") or narrowly ("qué
+    bancos son clientes"), and the LLM — not a brittle Python heuristic —
+    decides how much of the overview to use in its spoken answer. So the
+    tool always hands over a compact summary touching all six data files
+    (identity/mission, portfolio, clients, partners, success cases,
+    people/contact) alongside the specific matched detail."""
+    result = search_seti_knowledge("¿qué bancos son clientes de SETI?")
+    for keyword in (
+        "misión",
+        "portafolio",
+        "clientes",
+        "alianzas",
+        "casos de éxito",
+        "contacto",
+    ):
+        assert keyword in result.lower(), f"overview missing {keyword!r} area"
+
+
+def test_overview_ends_with_a_follow_up_prompt() -> None:
+    result = search_seti_knowledge("¿qué es SETI?")
+    lowered = result.lower()
+    assert "profundizar" in lowered or "conocer con más detalle" in lowered
+
+
 def test_excluded_methodology_domain_never_appears_in_the_index() -> None:
     """Guards the domain split: SETI-Spec/OpenSpec/SDD must never leak into the
     kiosk's knowledge base, even if data/ is edited later without re-reading

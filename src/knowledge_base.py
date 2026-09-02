@@ -136,6 +136,43 @@ def _bm25_index() -> tuple[BM25Okapi, tuple[Chunk, ...]]:
     return BM25Okapi(corpus), chunks
 
 
+# A compact, hand-written summary touching all six data/*.md files (identity
+# & mission, portfolio, clients, partners, success cases, people & contact).
+# Always included alongside the retrieved detail chunks: whether a visitor's
+# question is broad ("cuéntame de SETI") or narrow ("qué bancos son
+# clientes") is a judgment call the LLM already makes reliably elsewhere in
+# this prompt (see REGLA DE INTERRUPCIÓN INTELIGENTE) — a Python heuristic
+# on query text proved unreliable (tried distinct-file spread and keyword
+# overlap; both misclassified realistic phrasings). So instead of guessing,
+# the tool always hands over both the overview and the specific matches, and
+# the prompt tells Nova when to lead with which.
+_OVERVIEW = """\
+## Resumen general de SETI (las 6 áreas — misión, portafolio, clientes, alianzas, casos de éxito, contacto)
+
+- **Misión y posicionamiento:** SETI S.A.S. (Servicios Especializados de \
+Tecnología e Informática), parte del holding KATIO Sistemas Globales \
+Informáticos (Madrid), con 29 años de trayectoria y el propósito \
+"Crecemos para nuestros clientes".
+- **Portafolio de servicios (Modelo PRIME):** Desarrollo de software, \
+Ingeniería de Datos e IA (DataSimple), Cloud, y Prime OPS (operación de \
+infraestructura 24/7).
+- **Clientes:** más de 160 clientes corporativos, entre bancos, grupos \
+empresariales, retail, energía y otros sectores.
+- **Alianzas:** partners certificados como AWS, Microsoft, Google Cloud, \
+Oracle, MongoDB e IBM.
+- **Casos de éxito:** migraciones críticas para BTG Pactual, ahorros de \
+costos comprobados en varios clientes, y soluciones de inteligencia \
+artificial en retail.
+- **Talento y contacto:** más de 1.000 colaboradores IT, y contacto \
+comercial en comercial@seti.com.co.
+
+Si el visitante preguntó algo amplio sobre la empresa, usa este resumen y \
+termina preguntándole cuál área quiere conocer con más detalle para \
+profundizar (portafolio, clientes, alianzas, casos de éxito, o contacto). \
+Si ya preguntó algo específico, ve directo al detalle relacionado que sigue \
+abajo, sin repetir el resumen completo.
+"""
+
 # The two chunks that best answer "what is SETI / what does it do". Always
 # included: a broad conversational question ("cuéntame de SETI", "qué sabes
 # de la empresa") carries almost no lexical signal — "seti" itself appears in
@@ -165,9 +202,7 @@ def search_seti_knowledge(query: str, top_k: int = 4) -> str:
     selected = list(dict.fromkeys(anchors + matched))[:_MAX_CHUNKS]
 
     if not selected:
-        return (
-            "No hay información específica sobre esa consulta en la base de "
-            "conocimiento de SETI."
-        )
+        return _OVERVIEW
 
-    return "\n\n---\n\n".join(chunks[i].text for i in selected)
+    detail = "\n\n---\n\n".join(chunks[i].text for i in selected)
+    return f"{_OVERVIEW}\n\n---\n\n{detail}"
