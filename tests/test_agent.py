@@ -15,6 +15,7 @@ from agent import (
     NovaAssistant,
     _closing_pantalla_instructions,
     _deliver_pantalla_reply,
+    _PantallaGuard,
     _pending_pantalla_replies,
     build_on_enter_instructions,
     on_enter_should_defer,
@@ -325,6 +326,36 @@ def test_closing_thanks_finish_tool_called_before_farewell_speech() -> None:
     snippet = nova[idx : idx + 260]
     assert "navigate_journey(finish)" in snippet
     assert "PRIMERO" in snippet
+
+
+def test_retake_photo_resets_generating_and_delivered_guards() -> None:
+    """Regression (2026-09-02, RM_SpsHnphyUjch logs): a visitor retook their
+    card photo, then said "quiero enviar el reporte" / "enviar" many times
+    while the agent kept repeating "se están enviando a tu correo" without
+    ever calling navigate_journey(advance). Root cause: retake_photo only
+    forgot the "closing:photo" once-only pantalla guard, so the second pass
+    through closing:generating and closing:delivered (after the retake) was
+    silently swallowed by the once-only guard — the model never received
+    fresh CLOSING DELIVERED instructions telling it to call
+    navigate_journey(advance), so it just improvised stalling narration.
+    """
+    guard = _PantallaGuard()
+
+    # First pass through the closing cycle: both cues get narrated once.
+    guard.mark_narrated("closing:photo")
+    guard.mark_narrated("closing:generating")
+    guard.mark_narrated("closing:delivered")
+    assert guard.already_narrated("closing:generating")
+    assert guard.already_narrated("closing:delivered")
+
+    # Visitor asks to retake the photo — this must reset every closing
+    # once-key so the second generating/delivered pass narrates again,
+    # not just the pose screen.
+    guard.on_navigate_action("retake_photo")
+
+    assert not guard.already_narrated("closing:photo")
+    assert not guard.already_narrated("closing:generating")
+    assert not guard.already_narrated("closing:delivered")
 
 
 @pytest.mark.asyncio

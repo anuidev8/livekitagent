@@ -1051,6 +1051,71 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     return None
 
 
+class _PantallaGuard:
+    """Per-session dedupe state for [pantalla:] screen cues.
+
+    Instantiated fresh inside `my_agent()` for each room/job — never at
+    module scope — so concurrent kiosk sessions never share state.
+
+    Owns two independent guards:
+    - a short debounce window (`is_duplicate`) that drops truly duplicate
+      cues arriving within `_PANTALLA_DEDUPE_SECONDS` of each other.
+    - a "narrated once" set for closing cues (photo, generating, delivered)
+      that must be spoken exactly once per pass through that phase.
+
+    Regression: retake_photo sends the visitor through pose → capture →
+    generating → delivered again. Only the "closing:photo" once-key was
+    ever forgotten on retake, so the second pass through generating/
+    delivered was silently swallowed by the once-only guard — the model
+    never received fresh navigate_journey(advance) guidance for that
+    cycle, so it fell back to improvising ungrounded "sending it now"
+    narration in a loop and never actually called the tool (2026-09-02
+    RM_SpsHnphyUjch logs: visitor repeated "enviar" many times, agent kept
+    saying "se están enviando" without ever navigating). `on_navigate_action`
+    now forgets every closing once-key on retake, not just the pose one.
+    """
+
+    def __init__(self) -> None:
+        self._last_key = ""
+        self._last_at = 0.0
+        self._once_keys: set[str] = set()
+
+    @property
+    def last_key(self) -> str:
+        return self._last_key
+
+    def already_narrated(self, key: str) -> bool:
+        return key in self._once_keys
+
+    def mark_narrated(self, key: str) -> None:
+        self._once_keys.add(key)
+
+    def forget_narrated(self, key: str) -> None:
+        self._once_keys.discard(key)
+
+    def is_duplicate(self, key: str) -> bool:
+        now = time.monotonic()
+        if key == self._last_key and (now - self._last_at) < _PANTALLA_DEDUPE_SECONDS:
+            return True
+        self._last_key = key
+        self._last_at = now
+        return False
+
+    def on_navigate_action(self, action: str) -> None:
+        # retake_photo restarts the closing pose → capture → generating →
+        # delivered cycle. Forget every once-only key in that cycle — not
+        # just "closing:photo" — or the second pass through generating/
+        # delivered is silently skipped and the model never gets fresh
+        # instructions telling it to call navigate_journey(advance).
+        if action == "retake_photo":
+            for key in ("closing:photo", "closing:generating", "closing:delivered"):
+                self.forget_narrated(key)
+            logger.info(
+                "[navigate_journey] retake_photo — reset closing pantalla guards "
+                "(photo, generating, delivered)"
+            )
+
+
 # Grace period to let an in-flight utterance finish naturally before
 # forcing new screen content through. Purely dynamic — checks whether the
 # agent is actually speaking right now (session.current_speech), not a
@@ -1163,52 +1228,22 @@ async def my_agent(ctx: JobContext):
     _on_enter_done = asyncio.Event()
     # Cartesia on_enter + TTS can take 15s+; queue [pantalla:] cues instead of dropping.
     _pantalla_queue: list[str] = []
-    _pantalla_guard: dict[str, object] = {
-        "last_key": "",
-        "last_at": 0.0,
-        "once_keys": set(),
-    }
+    _pantalla_guard = _PantallaGuard()
 
     def _pantalla_already_narrated(key: str) -> bool:
-        once = _pantalla_guard["once_keys"]
-        assert isinstance(once, set)
-        return key in once
+        return _pantalla_guard.already_narrated(key)
 
     def _mark_pantalla_narrated(key: str) -> None:
-        once = _pantalla_guard["once_keys"]
-        assert isinstance(once, set)
-        once.add(key)
+        _pantalla_guard.mark_narrated(key)
 
     def _forget_pantalla_narrated(key: str) -> None:
-        once = _pantalla_guard["once_keys"]
-        assert isinstance(once, set)
-        once.discard(key)
+        _pantalla_guard.forget_narrated(key)
 
     def _on_navigate_action(action: str) -> None:
-        # retake_photo sends the visitor back to closing:pose, which shares
-        # the "closing:photo" once-only dedupe key with the first pass
-        # through that phase. Without this reset, the pose narration is
-        # silently skipped on every retake — the visitor hears nothing,
-        # asks again, and the model (with nothing new to react to) can
-        # start improvising a "photo captured, sending now" outcome that
-        # never actually happened while the UI is still sitting on pose.
-        if action == "retake_photo":
-            _forget_pantalla_narrated("closing:photo")
-            logger.info(
-                "[navigate_journey] retake_photo — reset closing:photo pantalla guard"
-            )
+        _pantalla_guard.on_navigate_action(action)
 
     def _should_skip_duplicate_pantalla(key: str) -> bool:
-        now = time.monotonic()
-        last_key = _pantalla_guard["last_key"]
-        last_at = _pantalla_guard["last_at"]
-        assert isinstance(last_key, str)
-        assert isinstance(last_at, float)
-        if key == last_key and (now - last_at) < _PANTALLA_DEDUPE_SECONDS:
-            return True
-        _pantalla_guard["last_key"] = key
-        _pantalla_guard["last_at"] = now
-        return False
+        return _pantalla_guard.is_duplicate(key)
 
     # "generating" typically runs ~20-25s in practice — long enough that
     # total silence after the one allowed status line can feel dead. But the
@@ -1225,7 +1260,7 @@ async def my_agent(ctx: JobContext):
         await asyncio.sleep(_generating_keepalive_delay_s)
         # If a newer distinct cue (e.g. closing:delivered) has already
         # landed, the wait is over — nothing to fill anymore.
-        if _pantalla_guard["last_key"] != token_key:
+        if _pantalla_guard.last_key != token_key:
             return
         logger.info("[text_input] generating keep-alive firing (still on %s)", token_key)
         _deliver_pantalla_reply(
