@@ -13,6 +13,7 @@ Companion frontend: `huella-digital` (registers the matching RPC methods on the 
 
 ---
 
+
 ## How the agent is built (Python)
 
 Everything that runs in production lives in `src/`. The live path is intentionally small: one entry file, one agent class, one RPC helper.
