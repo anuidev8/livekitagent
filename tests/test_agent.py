@@ -8,6 +8,7 @@ import agent as agent_module
 from agent import (
     _GENERATING_SETI_FACTS,
     _PANTALLA_INTERRUPT_GRACE_S,
+    _SESSION_RECONNECTED_INSTRUCTIONS,
     _USER_VOICE_TOOL_HINT,
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
@@ -23,6 +24,11 @@ from agent import (
     _pending_pantalla_replies,
     build_on_enter_instructions,
     on_enter_should_defer,
+)
+from nova_session_continuation import (
+    _RECONNECT_EVENT_PATCH_MARKER,
+    _with_session_reconnected_emit,
+    install_nova_session_reconnected_event_fix,
 )
 from tasks import AnalysisTask, AttractTask
 
@@ -203,6 +209,99 @@ async def test_nova_recycle_cancels_a_stale_independent_timer() -> None:
     await asyncio.sleep(0)
     assert stale_timer.cancelled()
     await fake._session_recycle_task
+
+
+@pytest.mark.asyncio
+async def test_reconnect_emit_wrapper_calls_original_then_emits() -> None:
+    """Regression (2026-09-02, RM_vZnfXrLvRboG logs): a mid-call Nova recycle
+    left the model speaking as if it were acting ("vamos a proceder con eso",
+    "colócate frente al espejo para tomar la foto") but it never called
+    get_session_state / present_content / navigate_journey again for the
+    rest of the session — livekit-plugins-aws 1.7.0's recycle never emitted
+    RealtimeSession's own documented "session_reconnected" event, so
+    application code had no signal to react to. The wrapper must run the
+    real recycle to completion, THEN emit session_reconnected exactly once —
+    never before the recycle finishes, never on failure.
+    """
+    call_order: list[str] = []
+
+    async def fake_original_recycle(self: object) -> None:
+        call_order.append("recycle")
+        await asyncio.sleep(0)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.emitted: list[tuple[str, object]] = []
+
+        def emit(self, event: str, payload: object) -> None:
+            call_order.append("emit")
+            self.emitted.append((event, payload))
+
+    wrapped = _with_session_reconnected_emit(fake_original_recycle)
+    fake = FakeSession()
+    await wrapped(fake)
+
+    assert call_order == ["recycle", "emit"]
+    assert len(fake.emitted) == 1
+    event_name, payload = fake.emitted[0]
+    assert event_name == "session_reconnected"
+    from livekit.agents.llm.realtime import RealtimeSessionReconnectedEvent
+
+    assert isinstance(payload, RealtimeSessionReconnectedEvent)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_emit_wrapper_skips_emit_when_recycle_fails() -> None:
+    """A failed recycle must propagate its error, not silently emit
+    session_reconnected as if reconnection succeeded."""
+
+    async def failing_recycle(self: object) -> None:
+        raise RuntimeError("bedrock stream init failed")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.emitted: list[tuple[str, object]] = []
+
+        def emit(self, event: str, payload: object) -> None:
+            self.emitted.append((event, payload))
+
+    wrapped = _with_session_reconnected_emit(failing_recycle)
+    fake = FakeSession()
+    with pytest.raises(RuntimeError, match="bedrock stream init failed"):
+        await wrapped(fake)
+
+    assert fake.emitted == []
+
+
+def test_reconnect_event_fix_is_installed_and_idempotent() -> None:
+    """agent.py installs this at import time (see agent_module import above).
+    Calling it again must be a no-op that still reports success, matching
+    the sibling _start_session_recycle_timer fix's idempotency contract."""
+    from livekit.plugins.aws.experimental.realtime import realtime_model
+
+    current = realtime_model.RealtimeSession._graceful_session_recycle
+    assert getattr(current, _RECONNECT_EVENT_PATCH_MARKER, False)
+
+    assert install_nova_session_reconnected_event_fix() is True
+    # Re-installing must not wrap an already-wrapped method a second time.
+    assert realtime_model.RealtimeSession._graceful_session_recycle is current
+
+
+def test_session_reconnected_instructions_force_resync_before_anything_else() -> None:
+    """The reinforcement instruction fired on session_reconnected must force
+    a fresh get_session_state before the model reacts to anything else, ban
+    assuming/improvising the screen from pre-reconnect memory, tell it to
+    actually call the tool for anything it only claimed to do before the
+    reconnect, and never surface the reconnect to the visitor."""
+    instructions = _SESSION_RECONNECTED_INSTRUCTIONS
+    assert "get_session_state" in instructions
+    assert "PRIMERO" in instructions
+    idx_get_state = instructions.find("get_session_state")
+    idx_primero = instructions.find("PRIMERO")
+    assert idx_get_state < idx_primero
+    assert "PROHIBIDO asumir" in instructions or "PROHIBIDO" in instructions
+    assert "nunca la des por hecha" in instructions.lower()
+    assert "nunca lo menciones" in instructions.lower()
 
 
 @pytest.mark.skip(

@@ -33,7 +33,10 @@ from livekit.plugins import ai_coustics, cartesia
 
 from knowledge_base import search_seti_knowledge
 from narration_barrier import NarrationBarrier, set_session_narration_barrier
-from nova_session_continuation import install_nova_session_continuation_fix
+from nova_session_continuation import (
+    install_nova_session_continuation_fix,
+    install_nova_session_reconnected_event_fix,
+)
 from rpc_client import rpc, wait_for_kiosk_participant
 from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
 
@@ -66,6 +69,31 @@ for _old in _all_logs[:-30]:
     _old.unlink(missing_ok=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# FIXED (2026-09-02, RM_vZnfXrLvRboG logs): a recycle landing mid-conversation
+# could silently break the model's tool-calling discipline for the rest of
+# the session. In that trace, the visitor asked to retake the photo ~1.6s
+# after "[SESSION] Session recycled successfully"; the model verbally agreed
+# ("vamos a proceder con eso" / then "colócate frente al espejo para tomar la
+# foto", both logged with visible stutter/[interrupted] repeats) but never
+# issued another get_session_state, present_content, or navigate_journey call
+# for the remainder of the session — a hard violation of the "every visitor
+# turn calls get_session_state first" contract in NOVA_INSTRUCTIONS. The
+# room's kiosk-side UI stayed stuck on closing:delivered while the voice
+# claimed to be moving the visitor to the photo step; the LiveKit data
+# channels closed unexpectedly ~33s later.
+# initialize_streams(is_restart=True) does resend tools/instructions/history
+# on recycle (see _serialize_tool_config call site in the vendored
+# livekit-plugins-aws realtime_model.py), so this wasn't a missing-tools bug —
+# more likely the model was treating the replayed history as passive context
+# instead of staying in the active per-turn tool loop right after
+# reconnecting. livekit-plugins-aws 1.7.0's recycle also never emitted
+# RealtimeSession's own documented "session_reconnected" event (every other
+# realtime session type does, e.g. RealtimeFallbackAdapter), so application
+# code had no framework-standard signal to react to. Fix:
+# install_nova_session_reconnected_event_fix() (nova_session_continuation.py)
+# makes the recycle emit that event, and the session_reconnected handler
+# below re-anchors the model with a forced get_session_state before it
+# responds to anything else post-reconnect.
 NOVA_SESSION_REFRESH_SECONDS = int(os.getenv("NOVA_SESSION_REFRESH_SECONDS", "420"))
 if not 60 <= NOVA_SESSION_REFRESH_SECONDS <= 420:
     raise ValueError(
@@ -75,6 +103,7 @@ if not 60 <= NOVA_SESSION_REFRESH_SECONDS <= 420:
 os.environ["LK_SESSION_MAX_DURATION"] = str(NOVA_SESSION_REFRESH_SECONDS)
 aws = importlib.import_module("livekit.plugins.aws")
 install_nova_session_continuation_fix()
+install_nova_session_reconnected_event_fix()
 
 logger = logging.getLogger("agent")
 
@@ -1198,6 +1227,27 @@ def _generating_keepalive_instructions(tick: int) -> str:
     )
 
 
+# Regression (2026-09-02, RM_vZnfXrLvRboG logs): see the NOVA_SESSION_REFRESH_
+# SECONDS comment above. A mid-call Nova recycle left the model speaking as if
+# it were acting without ever calling a tool again. This instruction re-anchors
+# it in the real UI state the instant the recycle-driven session_reconnected
+# event fires, before it reacts to anything the visitor says next.
+_SESSION_RECONNECTED_INSTRUCTIONS = (
+    "RECONEXIÓN TÉCNICA — la sesión de voz se acaba de reconectar por dentro "
+    "(invisible para el visitante, nunca lo menciones). Antes de decir o "
+    "hacer cualquier otra cosa: llama get_session_state PRIMERO para "
+    "recuperar el paso y la fase reales — PROHIBIDO asumir, recordar o "
+    "improvisar en qué pantalla está a partir de lo que dijiste antes de "
+    "reconectar. Si ya habías anunciado una acción (tomar foto, enviar "
+    "reporte, avanzar, etc.) y no llamaste al tool correspondiente, "
+    "retómala ahora con el tool real — nunca la des por hecha solo porque "
+    "la mencionaste en voz. A partir de aquí sigue el contrato normal: "
+    "get_session_state en cada turno, present_content si hace falta, "
+    "navigate_journey solo cuando el visitante confirme una acción de "
+    "availableActions."
+)
+
+
 # Grace period to let an in-flight utterance finish naturally before
 # forcing new screen content through. Purely dynamic — checks whether the
 # agent is actually speaking right now (session.current_speech), not a
@@ -1614,6 +1664,15 @@ async def my_agent(ctx: JobContext):
             interrupted = getattr(item, "interrupted", False)
             suffix = " [interrupted]" if interrupted else ""
             logger.info("[%s]%s %s", role.upper(), suffix, text)
+
+    @session.on("session_reconnected")
+    def _on_session_reconnected(event) -> None:
+        # See install_nova_session_reconnected_event_fix() and the
+        # RM_vZnfXrLvRboG regression note above NOVA_SESSION_REFRESH_SECONDS.
+        logger.info(
+            "[SESSION] session_reconnected — re-anchoring via get_session_state"
+        )
+        _deliver_pantalla_reply(session, _SESSION_RECONNECTED_INSTRUCTIONS)
 
     async def _replay_queued_pantalla() -> None:
         await _on_enter_done.wait()
