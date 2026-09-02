@@ -6,6 +6,7 @@ from livekit.agents import inference, llm
 
 import agent as agent_module
 from agent import (
+    _GENERATING_SETI_FACTS,
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
@@ -15,6 +16,7 @@ from agent import (
     NovaAssistant,
     _closing_pantalla_instructions,
     _deliver_pantalla_reply,
+    _generating_keepalive_instructions,
     _PantallaGuard,
     _pending_pantalla_replies,
     build_on_enter_instructions,
@@ -356,6 +358,35 @@ def test_retake_photo_resets_generating_and_delivered_guards() -> None:
     assert not guard.already_narrated("closing:photo")
     assert not guard.already_narrated("closing:generating")
     assert not guard.already_narrated("closing:delivered")
+
+
+def test_generating_keepalive_never_repeats_and_never_claims_completion() -> None:
+    """Feedback: while the card is generating, visitors heard the agent
+    either go dead silent for long stretches or repeat the same filler
+    phrase. Each keepalive tick must (a) carry a distinct SETI fact so
+    consecutive ticks never sound the same, (b) explicitly forbid repeating
+    prior phrasing, and (c) never claim the card/report is ready — that
+    would resurrect the original "sending" hallucination bug.
+    """
+    assert len(_GENERATING_SETI_FACTS) >= 4
+    assert len(set(_GENERATING_SETI_FACTS)) == len(_GENERATING_SETI_FACTS)
+
+    seen_facts = set()
+    for tick in range(len(_GENERATING_SETI_FACTS)):
+        instructions = _generating_keepalive_instructions(tick)
+        fact = _GENERATING_SETI_FACTS[tick]
+        assert fact in instructions
+        seen_facts.add(fact)
+        assert "PROHIBIDO repetir" in instructions
+        assert "PROHIBIDO ABSOLUTO" in instructions
+        assert "listos" in instructions or "listo" in instructions
+
+    # Every tick in one full cycle used a different fact.
+    assert len(seen_facts) == len(_GENERATING_SETI_FACTS)
+
+    # Cycling past the end of the list wraps around rather than crashing.
+    wrapped = _generating_keepalive_instructions(len(_GENERATING_SETI_FACTS))
+    assert _GENERATING_SETI_FACTS[0] in wrapped
 
 
 @pytest.mark.asyncio

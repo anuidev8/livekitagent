@@ -1015,8 +1015,12 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "y PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos, "
             "generados o pueden enviarse — eso no es cierto todavía en esta fase. "
             "No vuelvas a llamar get_session_state por tu cuenta ni des ninguna "
-            "actualización más, sin importar cuánto tarde. Espera en silencio total "
-            "hasta que llegue de verdad [pantalla:closing:delivered]."
+            "actualización más POR INICIATIVA PROPIA, sin importar cuánto tarde — "
+            "quédate en silencio hasta la próxima instrucción. Si el sistema te "
+            "envía una nueva instrucción de espera con un dato de SETI, ese es un "
+            "aviso legítimo del sistema, no algo que decidiste tú: síguela con "
+            "una locución breve y distinta, sin comentar que estás siguiendo una "
+            "instrucción."
         )
     if "closing:delivered" in text:
         return (
@@ -1114,6 +1118,66 @@ class _PantallaGuard:
                 "[navigate_journey] retake_photo — reset closing pantalla guards "
                 "(photo, generating, delivered)"
             )
+
+
+# Grounded facts for the closing:generating wait — same canonical numbers as
+# knowledge_base._OVERVIEW (identity, PRIME model, clients, partners, success
+# cases), rewritten as short standalone spoken lines. Used to fill dead air
+# while the card/report is being composed, instead of the model either going
+# fully silent for 20-40s or (worse, seen in real sessions) improvising
+# repeated/ungrounded filler. Never invent new SETI facts elsewhere in this
+# file — this tuple and knowledge_base.py are the only sources of truth.
+_GENERATING_SETI_FACTS: tuple[str, ...] = (
+    "SETI S.A.S. lleva 29 años ayudando a que sus clientes crezcan con "
+    'tecnología, bajo el propósito "Crecemos para nuestros clientes".',
+    "SETI hace parte del holding KATIO Sistemas Globales Informáticos, con "
+    "sede en Madrid, y atiende a más de 160 clientes corporativos.",
+    "El modelo PRIME de SETI combina desarrollo de software, ingeniería de "
+    "datos e inteligencia artificial, nube, y operación de infraestructura "
+    "24/7.",
+    "SETI es partner certificado de AWS, Microsoft, Google Cloud, Oracle, "
+    "MongoDB e IBM.",
+    "SETI ha liderado migraciones críticas como la de BTG Pactual, con "
+    "ahorros de costos comprobados para sus clientes.",
+    "Detrás de SETI hay más de mil colaboradores especializados en tecnología.",
+)
+
+_GENERATING_KEEPALIVE_FIRST_DELAY_S = 14.0
+_GENERATING_KEEPALIVE_REPEAT_S = 16.0
+# Bounded so a stuck/never-arriving closing:delivered can't turn this into
+# indefinite chatter — after this many ticks it goes back to full silence,
+# same as the old one-shot behavior.
+_GENERATING_KEEPALIVE_MAX_TICKS = 6
+
+
+def _generating_keepalive_instructions(tick: int) -> str:
+    """Instructions for the Nth (0-indexed) closing:generating filler line.
+
+    Regression: visitors reported the wait feeling dead, and in real
+    sessions the model — with nothing new to say and no further guidance —
+    fell back to literally repeating its own prior line. Nova sees the full
+    turn history, so a verbatim repeat reads as the agent being stuck. Each
+    tick must therefore sound different from every earlier one in this
+    phase; ticks after the first pivot to one grounded SETI fact apiece
+    (cycling through `_GENERATING_SETI_FACTS`), framed as a brief
+    "while we wait" aside — never as if the card were ready.
+    """
+    fact = _GENERATING_SETI_FACTS[tick % len(_GENERATING_SETI_FACTS)]
+    return (
+        "CLOSING GENERATING — la tarjeta sigue en proceso, el visitante "
+        "sigue esperando. Locución MUY corta (1 frase), en tus propias "
+        "palabras, DISTINTA a cualquier frase ya dicha en esta fase "
+        "(incluida la primera locución al entrar a esta pantalla) — "
+        "PROHIBIDO repetir o reformular algo ya dicho. Usa este dato real "
+        "de SETI como contenido, parafraseado, breve, tono cálido, NUNCA "
+        f"leído literal: «{fact}» Enlázalo con una transición breve tipo "
+        "«mientras se termina de armar tu tarjeta…». PROHIBIDO ABSOLUTO "
+        "decir o insinuar que la tarjeta o el informe YA están listos, "
+        "generados o pueden enviarse — eso solo es cierto cuando llegue de "
+        "verdad [pantalla:closing:delivered]. Tras decirla, SILENCIO otra "
+        "vez hasta la próxima actualización o hasta que llegue esa "
+        "pantalla."
+    )
 
 
 # Grace period to let an in-flight utterance finish naturally before
@@ -1245,36 +1309,38 @@ async def my_agent(ctx: JobContext):
     def _should_skip_duplicate_pantalla(key: str) -> bool:
         return _pantalla_guard.is_duplicate(key)
 
-    # "generating" typically runs ~20-25s in practice — long enough that
-    # total silence after the one allowed status line can feel dead. But the
-    # earlier fix (say it once, then go silent) exists specifically because
-    # letting the model re-narrate on its own led to it hallucinating a
-    # premature "your card is ready" a few seconds in. So this is scheduled
-    # by CODE on a timer, not left to the model's own judgment about when to
-    # speak again, and its content is constrained to never claim completion.
-    _generating_keepalive_delay_s = 14.0
-
+    # "generating" typically runs ~20-40s in practice — long enough that
+    # total silence after the one allowed status line can feel dead, and
+    # long enough to outlast a single filler line. But the earlier fix (say
+    # one status line, then go silent) exists specifically because letting
+    # the model re-narrate on its own led to it hallucinating a premature
+    # "your card is ready" a few seconds in — or, seen later, repeating its
+    # own prior line verbatim when it had nothing new to say. So this stays
+    # scheduled by CODE on a timer, never left to the model's own judgment
+    # about when to speak again: each tick calls
+    # `_generating_keepalive_instructions(tick)` for content that is always
+    # distinct from the last (a new SETI fact per tick) and constrained to
+    # never claim completion, and stops once a newer cue (closing:delivered)
+    # has landed or `_GENERATING_KEEPALIVE_MAX_TICKS` is reached.
     async def _generating_keepalive(
         agent_session: AgentSession, token_key: str
     ) -> None:
-        await asyncio.sleep(_generating_keepalive_delay_s)
-        # If a newer distinct cue (e.g. closing:delivered) has already
-        # landed, the wait is over — nothing to fill anymore.
-        if _pantalla_guard.last_key != token_key:
-            return
-        logger.info("[text_input] generating keep-alive firing (still on %s)", token_key)
-        _deliver_pantalla_reply(
-            agent_session,
-            "CLOSING GENERATING — segunda locución MUY corta (1 frase) mientras "
-            "sigue esperando, para que la espera no se sienta vacía. Menciona de "
-            "forma cálida y genérica qué se está combinando en la tarjeta (su "
-            "informe, su presencia digital, y su foto si se tomó). "
-            "PROHIBIDO ABSOLUTO decir o insinuar que ya está lista, generada, "
-            "terminada o que puede enviarse — sigue en proceso, eso solo es "
-            "cierto cuando llegue de verdad [pantalla:closing:delivered]. "
-            "PROHIBIDO repetir literalmente la primera locución de esta fase. "
-            "Tras decirla, SILENCIO otra vez hasta que llegue esa pantalla.",
-        )
+        delay = _GENERATING_KEEPALIVE_FIRST_DELAY_S
+        for tick in range(_GENERATING_KEEPALIVE_MAX_TICKS):
+            await asyncio.sleep(delay)
+            # If a newer distinct cue (e.g. closing:delivered) has already
+            # landed, the wait is over — nothing to fill anymore.
+            if _pantalla_guard.last_key != token_key:
+                return
+            logger.info(
+                "[text_input] generating keep-alive firing (tick=%d, still on %s)",
+                tick,
+                token_key,
+            )
+            _deliver_pantalla_reply(
+                agent_session, _generating_keepalive_instructions(tick)
+            )
+            delay = _GENERATING_KEEPALIVE_REPEAT_S
 
     def _pantalla_text_input_handler(
         agent_session: AgentSession, event: room_io.TextInputEvent
