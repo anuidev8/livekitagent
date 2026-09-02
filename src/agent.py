@@ -1161,21 +1161,33 @@ def _generating_keepalive_instructions(tick: int) -> str:
     phase; ticks after the first pivot to one grounded SETI fact apiece
     (cycling through `_GENERATING_SETI_FACTS`), framed as a brief
     "while we wait" aside — never as if the card were ready.
+
+    Regression (2026-09-02, RM_MeiLzPnKgbwA logs): with zero lead-in
+    guidance, the model recited the SETI fact almost verbatim and cold —
+    it landed like a company ad interrupting the wait rather than a "keeping
+    you company" aside. An earlier fix had banned a *long* fixed preamble
+    ("mientras se termina de armar tu tarjeta...") for eating into the
+    speaking budget and getting the fact cut off mid-word — the fix here is
+    a much shorter (2-4 word) transition, not the absence of one.
     """
     fact = _GENERATING_SETI_FACTS[tick % len(_GENERATING_SETI_FACTS)]
     return (
         "CLOSING GENERATING — la tarjeta sigue en proceso, el visitante "
         "sigue esperando. Locución MUY corta (1 frase, sin preámbulos "
-        "largos — ve directo al dato, sin frases de relleno antes), en tus "
-        "propias palabras, DISTINTA a cualquier frase ya dicha en esta "
+        "largos — ve directo casi al dato, sin frases de relleno antes), en "
+        "tus propias palabras, DISTINTA a cualquier frase ya dicha en esta "
         "fase (incluida la primera locución al entrar a esta pantalla) — "
-        "PROHIBIDO repetir o reformular algo ya dicho. Usa este dato real "
-        "de SETI como contenido, parafraseado, breve, tono cálido, NUNCA "
-        f"leído literal: «{fact}» PROHIBIDO ABSOLUTO decir o insinuar que "
-        "la tarjeta o el informe YA están listos, generados o pueden "
-        "enviarse — eso solo es cierto cuando llegue de verdad "
-        "[pantalla:closing:delivered]. Tras decirla, SILENCIO otra vez "
-        "hasta la próxima actualización o hasta que llegue esa pantalla."
+        "PROHIBIDO repetir o reformular algo ya dicho. Abre con una "
+        "transición ultra breve de 2 a 4 palabras («mientras tanto,», "
+        "«aprovechando la espera,», «de paso,» o similar) para que no "
+        "suene como una interrupción en frío — nunca sueltes el dato "
+        "directamente sin esa transición. Usa este dato real de SETI como "
+        "contenido, parafraseado, breve, tono cálido, NUNCA leído literal: "
+        f"«{fact}» PROHIBIDO ABSOLUTO decir o insinuar que la tarjeta o el "
+        "informe YA están listos, generados o pueden enviarse — eso solo es "
+        "cierto cuando llegue de verdad [pantalla:closing:delivered]. Tras "
+        "decirla, SILENCIO otra vez hasta la próxima actualización o hasta "
+        "que llegue esa pantalla."
     )
 
 

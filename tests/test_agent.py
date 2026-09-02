@@ -416,6 +416,26 @@ def test_generating_keepalive_grace_period_covers_longest_fact() -> None:
     assert "sin preámbulos largos" in instructions
 
 
+def test_generating_keepalive_requires_short_transition_not_cold_open() -> None:
+    """Feedback (2026-09-02, RM_MeiLzPnKgbwA logs): the SETI fact landed as a
+    cold, near-verbatim recitation with no lead-in at all — it read as a
+    company ad interrupting the wait, not as a "keeping you company" aside.
+    The earlier fix banned the old long preamble ("mientras se termina de
+    armar tu tarjeta...") for eating into the speaking budget and getting the
+    fact cut off mid-word. This asserts the replacement guidance requires a
+    much shorter transition (2-4 words) instead of swinging to "no
+    transition at all" — with a concrete example so the model isn't guessing.
+    """
+    instructions = _generating_keepalive_instructions(0)
+    assert "transici" in instructions.lower()
+    assert "2" in instructions and "4" in instructions
+    assert "mientras tanto" in instructions.lower()
+    # Must not regress into the long banned preamble, and must keep the
+    # "no long preambles" ceiling from the earlier fix.
+    assert "mientras se termina de armar tu tarjeta" not in instructions.lower()
+    assert "sin preámbulos largos" in instructions
+
+
 @pytest.mark.asyncio
 async def test_answer_seti_question_tool_delegates_to_knowledge_base() -> None:
     agent = Assistant()
