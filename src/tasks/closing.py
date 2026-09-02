@@ -29,7 +29,8 @@ class ClosingTask(HuellaPhaseTask):
                   • Visitor says yes / sí / quiero foto →
                       navigate_journey(ready_for_picture)  [starts card generation with photo]
                   • Visitor says no / omitir / sin foto →
-                      navigate_journey(skip_photo)  [goes straight to thanks — no card]
+                      navigate_journey(skip_photo)  [still builds the card, without a photo —
+                      goes through generating/delivered same as the photo path]
                 Do NOT proceed without an explicit answer. Manual buttons on
                 screen are also available if voice is not responding.
 

@@ -420,7 +420,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
         • El visitante dice sí / quiero / adelante →
             navigate_journey(ready_for_picture)  [genera la tarjeta con foto]
         • El visitante dice no / omitir / sin foto →
-            navigate_journey(skip_photo)  [pasa directo a thanks — sin tarjeta]
+            navigate_journey(skip_photo)  [arma la tarjeta igual, sin foto — pasa por generating y delivered]
       PROHIBIDO avanzar sin respuesta. PROHIBIDO preguntar dos veces.
       Si el visitante no responde o la voz no funciona, los botones
       en pantalla están disponibles («Sí, con foto» / «Continuar sin foto»).
@@ -428,7 +428,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Cuando confirme (listo, toma la foto, adelante): navigate_journey(ready_for_picture).
       Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
     - generating: locución CORTA — componiendo entrega para su correo.
-      PROHIBIDO pedir tomar foto — la captura ya ocurrió.
+      PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla).
     - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
       e imagen van juntos a su correo. Ofrece explícitamente DOS opciones:
       «Enviar reporte» (navigate_journey(advance)) o «repetir la foto» si no les convence
@@ -438,8 +438,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Si confirma enviar: navigate_journey(advance).
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
       cuando confirmen salir (sí, finalizar, finish): navigate_journey(finish).
-      Si photoSkipped=true en get_session_state: el visitante omitió la foto — NO se generó
-      tarjeta visual. PROHIBIDO mencionar tarjeta, foto o imagen. Solo correo/informe.
+      PROHIBIDO mencionar tarjeta, foto, imagen o correo — ya se explicó en delivered.
       PROHIBIDO repetir análisis o entrega.
 
     GESTOS (si preguntan o llegan por swipe):
@@ -793,7 +792,7 @@ _USER_VOICE_TOOL_HINT = (
     "Si step=closing y phase=photo_consent y el visitante dice sí / quiero foto / con foto: "
     "navigate_journey(ready_for_picture) de inmediato. "
     "Si step=closing y phase=photo_consent y el visitante dice no / sin foto / omitir / skip: "
-    "navigate_journey(skip_photo) de inmediato — pasa directo a la pantalla de cierre (thanks). "
+    "navigate_journey(skip_photo) de inmediato — arma la tarjeta igual, sin foto. "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
@@ -843,7 +842,7 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Pregunta en UNA frase natural si el visitante desea tomarse una foto para su tarjeta "
             "(la foto será la portada visual del informe). "
             "Dos caminos: sí / quiero / adelante → navigate_journey(ready_for_picture) [genera tarjeta con foto]; "
-            "no / omitir / sin foto → navigate_journey(skip_photo) [pasa directo a la pantalla de cierre]. "
+            "no / omitir / sin foto → navigate_journey(skip_photo) [arma la tarjeta igual, sin foto]. "
             "ESPERA su respuesta. PROHIBIDO avanzar sin confirmación. "
             "Si los botones en pantalla ya respondieron, no preguntes de nuevo."
         )
@@ -860,7 +859,7 @@ def _closing_pantalla_instructions(text: str) -> str | None:
         return (
             "CLOSING GENERATING — get_session_state. "
             "Locución CORTA (1-2 frases): componiendo tarjeta e informe para su correo. "
-            "PROHIBIDO pedir tomar foto — la captura YA ocurrió. "
+            "PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla). "
             "PROHIBIDO repetir el mismo mensaje de entrega."
         )
     if "closing:delivered" in text:
@@ -877,21 +876,10 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     if "closing:thanks" in text or (
         "step=closing" in text and "phase=thanks" in text
     ):
-        photo_skipped = "photoSkipped=true" in text or "IMPORTANTE: el visitante omitió la foto" in text
-        if photo_skipped:
-            return (
-                "CLOSING THANKS (sin foto) — get_session_state. "
-                "El visitante omitió la foto — NO se generó tarjeta visual. "
-                "Solo se envió el correo con el informe. "
-                "Agradecimiento cálido + invita a escanear el QR de SETI. "
-                "PROHIBIDO mencionar tarjeta, foto, imagen o retrato. Solo correo/informe. "
-                "Si el visitante confirma salir (sí, finalizar, finish, terminamos, listo): "
-                "navigate_journey(finish) de inmediato. "
-                "Si aún no confirmó: pregunta si finalizamos → ESPERA."
-            )
         return (
             "CLOSING THANKS — get_session_state. "
             "Agradecimiento cálido + invita a escanear el QR de SETI. "
+            "PROHIBIDO mencionar tarjeta, foto, imagen o correo — ya se explicó en delivered. "
             "Si el visitante confirma salir (sí, finalizar, finish, terminamos, listo): "
             "navigate_journey(finish) de inmediato. "
             "Si aún no confirmó: pregunta si finalizamos → ESPERA."
