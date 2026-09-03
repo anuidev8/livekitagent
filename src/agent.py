@@ -351,15 +351,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       * La UI SOLO auto-selecciona y avanza sola al Screen 4a cuando hay
         EXACTAMENTE una coincidencia. Si avanzó sola: perfecto, no hagas
         nada más.
-      * Si en 3 s NO avanzó, NUNCA asumas ni confirmes un nombre por tu
-        cuenta — puede haber varias personas con ese nombre esperando en
-        pantalla a que el visitante elija, o ninguna. Pregunta con calma:
-        "Encontré más de una persona con ese nombre, ¿me dices también tu
-        apellido completo?" (o que toque su nombre en pantalla). Con la
-        respuesta, llama fill_search de nuevo con el nombre completo —
-        repite hasta que quede una sola coincidencia y la UI avance sola.
-      * Si no hay coincidencia: ofrece intentar con otro nombre o pedir ayuda
-        del staff.
+      * Si en 3 s NO avanzó, llama get_session_state — facts.matchCount y
+        facts.matches[] (name, company, index) te dicen exactamente qué hay
+        en pantalla. NUNCA asumas ni confirmes un nombre sin mirar esto.
+      * matchCount 0: no hay coincidencia — ofrece intentar con otro nombre
+        (fill_search de nuevo) o pedir ayuda del staff.
+      * matchCount 1: raro llegar aquí (la UI ya debería haber avanzado
+        sola) — espera un poco más antes de actuar.
+      * matchCount 2+: lee los nombres de facts.matches (agrega la empresa
+        si ayuda a distinguir) y pregunta cuál es el visitante. En cuanto
+        confirme — por nombre completo o por posición ("el primero", "la
+        segunda") — llama select_search_result(index) con el índice de esa
+        entrada. Si no reconoce ninguno: pide el apellido completo y llama
+        fill_search de nuevo para acotar la lista.
 
     ────────────────────────────────────────────────
     Screen 4a — WELCOME READY (si encontrado)
@@ -816,6 +820,23 @@ class Assistant(Agent):
         tiene efecto visible.
         """
         return await rpc("fill_search", {"query": query})
+
+    @function_tool
+    async def select_search_result(self, context: RunContext, index: int) -> str:
+        """Confirma manualmente cuál resultado de búsqueda es el visitante,
+        en la pantalla identify_search.
+
+        La UI avanza SOLA cuando get_session_state.facts.matchCount es
+        exactamente 1 — no llames esta herramienta en ese caso, solo espera.
+
+        Úsala SOLO cuando facts.matchCount sea 2 o más (varias personas con
+        el mismo nombre) y el visitante ya haya confirmado en voz alta cuál
+        es la suya — por nombre completo o por posición ("el primero",
+        "la segunda"). `index` es 1-based, tal como aparece en
+        facts.matches[].index. NUNCA la llames por tu cuenta sin que el
+        visitante haya confirmado explícitamente cuál opción es la suya.
+        """
+        return await rpc("select_search_result", {"index": index})
 
     @function_tool
     async def answer_seti_question(self, context: RunContext, query: str) -> str:

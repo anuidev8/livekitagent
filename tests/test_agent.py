@@ -77,6 +77,7 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
         "present_content",
         "navigate_journey",
         "fill_search",
+        "select_search_result",
         "answer_seti_question",
     }
     assert NovaAssistant is Assistant
