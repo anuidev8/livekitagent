@@ -347,11 +347,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       * Pide al visitante que diga su nombre completo en voz alta.
       * En cuanto lo diga, llama fill_search(query="<nombre escuchado>")
         para escribirlo automáticamente en el campo de búsqueda.
-      * La UI auto-selecciona el primer resultado (~1 s después de que aparece)
-        y avanza al Screen 4a automáticamente — NO necesitas hacer nada más.
-      * Di solo: "Buscando <nombre>…" y quédate en silencio mientras la UI
-        selecciona. Si en 3 s no avanzó, pregunta si quieren reintentar.
-      * Si no hay coincidencia: ofrece intentar con otro nombre o pedir ayuda.
+      * Di solo: "Buscando <nombre>…" y quédate en silencio ~2-3 s.
+      * La UI SOLO auto-selecciona y avanza sola al Screen 4a cuando hay
+        EXACTAMENTE una coincidencia. Si avanzó sola: perfecto, no hagas
+        nada más.
+      * Si en 3 s NO avanzó, NUNCA asumas ni confirmes un nombre por tu
+        cuenta — puede haber varias personas con ese nombre esperando en
+        pantalla a que el visitante elija, o ninguna. Pregunta con calma:
+        "Encontré más de una persona con ese nombre, ¿me dices también tu
+        apellido completo?" (o que toque su nombre en pantalla). Con la
+        respuesta, llama fill_search de nuevo con el nombre completo —
+        repite hasta que quede una sola coincidencia y la UI avance sola.
+      * Si no hay coincidencia: ofrece intentar con otro nombre o pedir ayuda
+        del staff.
 
     ────────────────────────────────────────────────
     Screen 4a — WELCOME READY (si encontrado)
