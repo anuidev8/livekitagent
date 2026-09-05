@@ -1,5 +1,6 @@
 import asyncio
-from unittest.mock import MagicMock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from livekit.agents import inference, llm
@@ -7,9 +8,11 @@ from livekit.agents import inference, llm
 import agent as agent_module
 from agent import (
     _GENERATING_SETI_FACTS,
+    _PANTALLA_INTERRUPT_GRACE_NAV_S,
     _PANTALLA_INTERRUPT_GRACE_S,
     _SESSION_RECONNECTED_INSTRUCTIONS,
     _USER_VOICE_TOOL_HINT,
+    DIMENSION_LABELS,
     INSTRUCTIONS,
     MAIN_INSTRUCTIONS,
     NOVA_INSTRUCTIONS,
@@ -17,9 +20,12 @@ from agent import (
     NOVA_TURN_DETECTION,
     Assistant,
     NovaAssistant,
+    _analysis_pantalla_instructions,
     _closing_pantalla_instructions,
     _deliver_pantalla_reply,
     _generating_keepalive_instructions,
+    _log_rpc_state_summary,
+    _pantalla_dedupe_key,
     _PantallaGuard,
     _pending_pantalla_replies,
     build_on_enter_instructions,
@@ -332,8 +338,8 @@ def test_deliver_pantalla_reply_speaks_immediately_when_idle() -> None:
 
 @pytest.mark.asyncio
 async def test_deliver_pantalla_reply_waits_for_current_speech_then_speaks() -> None:
-    """Speech in flight — defer to a background task, don't cut it off, don't
-    interrupt once it finishes naturally within the grace period."""
+    """Filler/grace > 0: defer to a background task, don't cut mid-utterance
+    if it finishes within the grace period (used by generating keep-alive)."""
     session = MagicMock()
     handle = MagicMock()
     handle.done.return_value = False
@@ -344,7 +350,7 @@ async def test_deliver_pantalla_reply_waits_for_current_speech_then_speaks() -> 
     handle.wait_for_playout = _finishes_quickly
     session.current_speech = handle
 
-    _deliver_pantalla_reply(session, "nuevo contenido")
+    _deliver_pantalla_reply(session, "nuevo contenido", grace_s=2.0)
 
     # Deferred, not fired synchronously — the whole point is not to chop off
     # the in-flight utterance.
@@ -355,6 +361,26 @@ async def test_deliver_pantalla_reply_waits_for_current_speech_then_speaks() -> 
 
     handle.interrupt.assert_not_called()
     session.generate_reply.assert_called_once_with(instructions="nuevo contenido")
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_interrupts_immediately_on_button_nav() -> None:
+    """Default nav grace is 0 — button tap must cut old speech now
+    (2026-09-04_12-59-37: welcome kept talking after Comenzar)."""
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+    session.current_speech = handle
+
+    with patch("agent.asyncio.sleep", new=AsyncMock()):
+        _deliver_pantalla_reply(session, "contenido nueva pantalla")
+        assert len(_pending_pantalla_replies) == 1
+        await asyncio.gather(*_pending_pantalla_replies)
+
+    handle.interrupt.assert_called_once()
+    session.generate_reply.assert_called_once_with(
+        instructions="contenido nueva pantalla"
+    )
 
 
 @pytest.mark.asyncio
@@ -372,13 +398,192 @@ async def test_deliver_pantalla_reply_force_interrupts_after_grace_period() -> N
     handle.wait_for_playout = _never_finishes
     session.current_speech = handle
 
-    with patch.object(agent_module, "_PANTALLA_INTERRUPT_GRACE_S", 0.05):
-        _deliver_pantalla_reply(session, "contenido urgente")
-        assert len(_pending_pantalla_replies) == 1
-        await asyncio.gather(*_pending_pantalla_replies)
+    _deliver_pantalla_reply(session, "contenido urgente", grace_s=0.05)
+    assert len(_pending_pantalla_replies) == 1
+    await asyncio.gather(*_pending_pantalla_replies)
 
     handle.interrupt.assert_called_once()
     session.generate_reply.assert_called_once_with(instructions="contenido urgente")
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_skips_wait_when_session_moves_on() -> None:
+    """Regression (2026-09-04 14:04-14:09 logs): the visitor left a dimension
+    detail view and took their closing photo; the closing:generating cue
+    then captured session.current_speech pointing at the OLD detail_section
+    SpeechHandle. That handle's wait_for_playout() never resolved (its own
+    audio had already finished, but the framework never marked it done —
+    looks like autonomous Nova turns don't always update current_speech),
+    while the session had already moved on to a newer handle in the
+    meantime. The old single `wait_for(current.wait_for_playout(),
+    timeout=12.0)` had no way to notice that and sat completely silent for
+    the full 12s grace ("In-flight speech exceeded 12.0s") before the guide
+    said anything about closing:generating. The fix polls in short slices
+    and bails as soon as agent_session.current_speech no longer points at
+    the captured handle, instead of trusting a reference that can go stale.
+    """
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+
+    async def _never_finishes() -> None:
+        await asyncio.sleep(30)
+
+    handle.wait_for_playout = _never_finishes
+    session.current_speech = handle
+
+    async def _session_moves_on_after_a_bit() -> None:
+        await asyncio.sleep(0.1)
+        session.current_speech = MagicMock()  # a newer, unrelated handle
+
+    reassign_task = asyncio.create_task(_session_moves_on_after_a_bit())
+
+    start = time.monotonic()
+    _deliver_pantalla_reply(session, "contenido nuevo", grace_s=12.0)
+    assert len(_pending_pantalla_replies) == 1
+    await asyncio.gather(*_pending_pantalla_replies)
+    elapsed = time.monotonic() - start
+    await reassign_task
+
+    handle.interrupt.assert_called_once()
+    session.generate_reply.assert_called_once_with(instructions="contenido nuevo")
+    # Must bail out well before the full 12s grace once the session has
+    # moved on — a few poll slices, not the whole timeout.
+    assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_drops_stale_reply_after_grace_timeout() -> None:
+    """Regression (2026-09-04 logs): a single tap fired two pantalla cues ~1s
+    apart (analysis_results, then detail:continuous). Each spawned its own
+    wait-then-speak task; the first one's grace period expired AFTER the
+    second cue had already updated the guard, but it still spoke stale
+    "Higiene" content on top of the new dimension. With a pantalla_guard +
+    dedupe_key passed, the stale task must recognize it's been superseded
+    and drop itself instead of interrupting or speaking — no new timeout
+    tuning, just a freshness check against the guard's last_key."""
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+
+    async def _never_finishes() -> None:
+        await asyncio.sleep(10)
+
+    handle.wait_for_playout = _never_finishes
+    session.current_speech = handle
+
+    guard = _PantallaGuard()
+    guard.is_duplicate("analysis:results")  # sets last_key to the OLD cue
+
+    _deliver_pantalla_reply(
+        session,
+        "contenido viejo (higiene)",
+        grace_s=0.05,
+        pantalla_guard=guard,
+        dedupe_key="analysis:results",
+    )
+    assert len(_pending_pantalla_replies) == 1
+
+    # A newer cue arrives and updates the guard before the old task's grace
+    # period expires — simulating the second pantalla cue from the same tap.
+    guard.is_duplicate("detail:continuous")
+
+    await asyncio.gather(*_pending_pantalla_replies)
+
+    handle.interrupt.assert_not_called()
+    session.generate_reply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_drops_stale_reply_when_speech_finishes_naturally() -> None:
+    """Same supersession guard, but on the non-timeout path: even if the old
+    speech finishes playing out on its own before the grace period, a
+    superseded reply must not speak stale content over the new screen."""
+    session = MagicMock()
+    handle = MagicMock()
+    handle.done.return_value = False
+
+    async def _finishes_quickly() -> None:
+        return None
+
+    handle.wait_for_playout = _finishes_quickly
+    session.current_speech = handle
+
+    guard = _PantallaGuard()
+    guard.is_duplicate("analysis:results")
+
+    _deliver_pantalla_reply(
+        session,
+        "contenido viejo (higiene)",
+        pantalla_guard=guard,
+        dedupe_key="analysis:results",
+    )
+    guard.is_duplicate("detail:continuous")
+
+    await asyncio.gather(*_pending_pantalla_replies)
+
+    session.generate_reply.assert_not_called()
+
+
+def test_deliver_pantalla_reply_speaks_when_key_still_current() -> None:
+    """Sanity check: the freshness guard must not block the normal case —
+    a fresh, non-superseded reply still speaks immediately when idle."""
+    session = MagicMock()
+    session.current_speech = None
+
+    guard = _PantallaGuard()
+    guard.is_duplicate("welcome:ready")
+
+    _deliver_pantalla_reply(
+        session,
+        "hola",
+        pantalla_guard=guard,
+        dedupe_key="welcome:ready",
+    )
+    session.generate_reply.assert_called_once_with(instructions="hola")
+
+
+def test_deliver_pantalla_reply_defaults_to_responsive_nav_grace() -> None:
+    """Touch navigation defaults to immediate interrupt (grace 0).
+    Long grace is opt-in only for generating filler."""
+    import inspect
+
+    default = inspect.signature(_deliver_pantalla_reply).parameters["grace_s"].default
+    assert default == _PANTALLA_INTERRUPT_GRACE_NAV_S
+    assert _PANTALLA_INTERRUPT_GRACE_NAV_S == 0.0
+    assert _PANTALLA_INTERRUPT_GRACE_NAV_S < _PANTALLA_INTERRUPT_GRACE_S
+
+
+def test_analysis_scanning_instructions_forbid_welcome_replay() -> None:
+    """Button-nav past welcome must not re-greet on analysis:scanning
+    (2026-09-04_12-44-40 logs)."""
+    text = _analysis_pantalla_instructions("analysis:scanning")
+    assert text is not None
+    assert "PROHIBIDO ABSOLUTO" in text
+    assert "bienvenida" in text.lower() or "welcome" in text.lower()
+    assert "SCAN" in text
+
+
+def test_analysis_results_return_is_brief() -> None:
+    text = _analysis_pantalla_instructions("analysis:results")
+    assert text is not None
+    assert "De vuelta" in text or "volver" in text.lower()
+    assert "PROHIBIDO" in text
+
+
+def test_pantalla_dedupe_key_analysis_scanning() -> None:
+    key = _pantalla_dedupe_key(
+        "[pantalla:analysis:scanning] UI step=analysis phase=scanning."
+    )
+    assert key == "analysis:scanning"
+
+
+def test_detail_continuous_dedupe_includes_dimension() -> None:
+    cue = (
+        "[pantalla:detail:continuous] DETAIL_CONTINUOUS_TOUR — "
+        "UNA sola respuesta CONTINUA DIM_ID=ssi"
+    )
+    assert _pantalla_dedupe_key(cue) == "detail:continuous:ssi"
 
 
 def test_photo_consent_question_voices_the_decline_option() -> None:
@@ -430,6 +635,38 @@ def test_closing_thanks_finish_tool_called_before_farewell_speech() -> None:
     snippet = nova[idx : idx + 260]
     assert "navigate_journey(finish)" in snippet
     assert "PRIMERO" in snippet
+
+
+def test_closing_delivered_advance_tool_called_before_confirmation_speech() -> None:
+    """Regression (2026-09-04 13:14 logs): a visitor said "enviar" on the
+    closing:delivered card and the agent replied "Gracias, tu tarjeta e
+    informe ya estan en camino a tu correo" — but no navigate_journey call
+    was ever emitted that turn, so /api/session/send-report never fired and
+    nothing was actually sent. Root cause: unlike the photo_consent and
+    thanks instructions (which already say "LLAMA ... PRIMERO, antes de
+    decir cualquier palabra"), the closing:delivered instructions only said
+    *when* to call navigate_journey(advance), never that it must happen
+    before any confirmation speech. Mirrors the existing finish/back
+    "tool call moves the screen, your voice alone does not" pattern.
+    """
+    delivered = _closing_pantalla_instructions(
+        "[pantalla:closing:delivered] step=closing phase=delivered"
+    )
+    assert delivered is not None
+    assert "navigate_journey(advance)" in delivered
+    idx = delivered.find("CUANDO CONFIRME ENVIAR")
+    assert idx != -1
+    snippet = delivered[idx : idx + 500]
+    assert "PRIMERO" in snippet
+    assert "ok:true" in snippet
+
+    nova = NOVA_INSTRUCTIONS
+    idx_nova = nova.find("CUANDO CONFIRME ENVIAR")
+    assert idx_nova != -1
+    nova_snippet = nova[idx_nova : idx_nova + 500]
+    assert "navigate_journey(advance)" in nova_snippet
+    assert "PRIMERO" in nova_snippet
+    assert "ok:true" in nova_snippet
 
 
 def test_retake_photo_resets_generating_and_delivered_guards() -> None:
@@ -581,6 +818,124 @@ def test_delivered_narration_does_not_claim_photo_when_skipped() -> None:
 
     skipped_block = delivered[idx_skipped:idx_not_skipped]
     assert "sin mencionar foto" in skipped_block.lower()
+
+
+def test_detail_revisit_always_narrates_with_varied_closing() -> None:
+    """User feedback (2026-09-04): revisiting an already-toured dimension
+    used to skip straight to "quieres el informe, volver, u otra dimensión?"
+    with zero narration — a past fix to avoid tedious verbatim repeats, but
+    the visitor found a bare question with no acknowledgment of the
+    dimension jarring. Every detail entry, first visit or not, must narrate
+    — the old "PROHIBIDO repetir el detalle" rule must be gone, replaced by
+    "always narrate again, but vary the wording" — and the closing question
+    must vary instead of repeating the identical phrase every dimension.
+    """
+    assert "PROHIBIDO repetir el detalle de una dimensión ya narrada" not in NOVA_INSTRUCTIONS
+    idx = NOVA_INSTRUCTIONS.find("SIEMPRE narra de nuevo")
+    assert idx != -1
+    snippet = NOVA_INSTRUCTIONS[idx : idx + 700]
+    assert "ángulo" in snippet or "angulo" in snippet
+    assert "VARÍA esa pregunta" in NOVA_INSTRUCTIONS
+
+    # Regression (2026-09-04 17:16 logs): even with the "always narrate again"
+    # rule in place, the model composed "Ya hemos cubierto esta dimensión.
+    # Quieres el informe..." on a real SSI revisit — using its own memory of
+    # the conversation as an excuse to skip narration despite the explicit
+    # instruction. The exact phrase it used must be named as forbidden, not
+    # just "vary the wording" (which it was already told and ignored).
+    assert "ya cubrimos/cubierto esta dimensión" in snippet
+    assert "ya revisamos/revisado esta dimensión" in snippet
+
+
+def test_gate_rejections_always_produce_speech() -> None:
+    """Voice UX recommendation (docs/huella-guide-voice-ux-recommendation.md,
+    Codebase §2): navigate_journey/present_content gate rejections
+    (must_speak_welcome_first, ui_owns_detail_section_advance,
+    action_not_available, present_failed) carry a `hint` in the ok:false
+    tool result, but nothing previously forced Nova to say anything back —
+    a rejected command looked, from the visitor's side, identical to an
+    unresponsive agent. The prompt must force a short spoken line derived
+    from the hint before silently retrying."""
+    nova_lower = NOVA_INSTRUCTIONS.lower()
+    idx = nova_lower.find("ok:false")
+    assert idx != -1
+    window = NOVA_INSTRUCTIONS[idx : idx + 500]
+    window_lower = window.lower()
+    assert "nunca" in window_lower and "silencio" in window_lower
+    assert "hint" in window_lower
+    # Must not instruct reading the raw hint field verbatim — compose it.
+    assert "literal" in window_lower
+
+
+def test_stale_swipe_gesture_block_removed() -> None:
+    """Voice UX recommendation (Codebase §4): frontend swipe/gesture
+    navigation was already removed; the UI never sends
+    SWIPE_CONTINUE_REQUEST anymore, so this block was dead prompt weight
+    describing input the UI no longer sends."""
+    assert "SWIPE_CONTINUE_REQUEST" not in NOVA_INSTRUCTIONS
+    assert "GESTOS (si preguntan" not in NOVA_INSTRUCTIONS
+
+
+def test_dimension_trigger_labels_are_centralized() -> None:
+    """Voice UX recommendation (Codebase §4): dimension names were typed
+    twice as literal trigger phrases (NOVA_INSTRUCTIONS re-explain rule +
+    _USER_VOICE_TOOL_HINT). A rename or a 6th dimension would silently go
+    stale in one spot. Both trigger blocks must be built from one shared
+    DIMENSION_LABELS constant instead of hand-typed strings in each place."""
+    assert DIMENSION_LABELS == ("Autoridad", "SSI", "Mensaje", "Influencia", "Higiene")
+    for label in DIMENSION_LABELS:
+        assert label in NOVA_INSTRUCTIONS
+        assert label in _USER_VOICE_TOOL_HINT
+
+
+def test_log_rpc_state_summary_extracts_focus_fields(caplog) -> None:
+    """The whole point of this helper is to make "what did the tool call
+    resolve to" visible in logs — assert it actually surfaces the fields
+    that identify which dimension/screen a response is about, and that it
+    never raises on malformed input (called from real RPC round-trips)."""
+    import json as _json
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="agent"):
+        _log_rpc_state_summary(
+            "present_content",
+            _json.dumps(
+                {
+                    "ok": True,
+                    "step": "analysis",
+                    "phase": "results",
+                    "focusDimensionId": "arquitectura",
+                    "analysisDimIndex": 2,
+                }
+            ),
+        )
+    assert any(
+        "focusDimensionId=arquitectura" in r.message
+        and "analysisDimIndex=2" in r.message
+        for r in caplog.records
+    )
+
+    # Malformed / non-dict / non-JSON input must never raise.
+    _log_rpc_state_summary("get_session_state", "not json")
+    _log_rpc_state_summary("get_session_state", _json.dumps([1, 2, 3]))
+
+
+def test_result_dimension_requires_explicit_dimension_target() -> None:
+    """Regression (2026-09-04 15:49 logs): a visitor said "mensaje" on
+    analysis:results; present_content(result_dimension) was called without a
+    dimension_id, and the frontend's fallback resolved it to whichever
+    dimension was already focused (left over from the visitor's previous
+    stop) instead of Mensaje — so the guide narrated a different dimension's
+    facts than the one the visitor named. NOVA_INSTRUCTIONS must forbid
+    omitting dimensionId/index for result_dimension whenever the visitor
+    named a dimension, since the frontend has no reliable way to recover
+    the intended target from a bare "result_dimension" call.
+    """
+    idx = NOVA_INSTRUCTIONS.find("result_dimension SIEMPRE necesita")
+    assert idx != -1
+    snippet = NOVA_INSTRUCTIONS[idx : idx + 400]
+    assert "dimensionId" in snippet
+    assert "NUNCA lo omitas" in snippet
 
 
 @pytest.mark.asyncio

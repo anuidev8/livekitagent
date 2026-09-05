@@ -13,7 +13,6 @@ import logging
 
 from livekit.agents import AgentSession
 
-from tasks.speech import wait_for_agent_idle
 from tasks.ui_sync import speak_director_line
 
 logger = logging.getLogger("agent.intro_orchestrator")
@@ -52,11 +51,14 @@ def _token_valid(token: int) -> bool:
 async def _run_intro_tour(session: AgentSession, token: int) -> None:
     logger.info("intro orchestrator start token=%s", token)
     try:
-        # The intro cue is emitted while the start_experience tool turn may still
-        # be closing. Wait for that turn instead of interrupting it: interrupting
-        # here clips Nova's first syllable and leaves its server-side VAD unsettled.
-        await wait_for_agent_idle(session, timeout=12.0)
-        await asyncio.sleep(0.35)
+        # Button "Comenzar" often fires while welcome is still speaking.
+        # Waiting for idle let welcome audio continue into onboarding
+        # (2026-09-04_12-59-37). LiveKit pattern: interrupt() then speak.
+        try:
+            session.interrupt()
+        except Exception:
+            logger.debug("intro orchestrator interrupt raised", exc_info=True)
+        await asyncio.sleep(0.4)
 
         if not _token_valid(token):
             return
@@ -71,11 +73,11 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 "ni pausas largas. PROHIBIDO abrir anunciando lo que vas a hacer «ahora te "
                 "explico», «vamos a ver cómo funciona», «te cuento el onboarding» y similares "
                 "— PROHIBIDO decir la palabra 'onboarding'. Entra DIRECTO al contenido, "
-                "explicando ya mismo que pueden interactuar con gestos en el aire "
-                "—deslizar para avanzar— o con la voz. "
-                "PROHIBIDO ABSOLUTO mencionar 'pulgar arriba' en esta primera frase de "
-                "gestos — esa mención va SOLO más adelante, junto con las dimensiones, "
-                "nunca antes. "
+                "explicando ya mismo que este espejo responde a su toque en la pantalla "
+                "o a su voz — pueden tocar cuando quieran, o simplemente hablar. "
+                "PROHIBIDO ABSOLUTO mencionar cómo navegar entre resultados en esta "
+                "primera frase — esa mención va SOLO más adelante, junto con las "
+                "dimensiones, nunca antes. "
                 "Antes de nombrarlas, agrega UNA frase muy breve que enmarque qué son "
                 "las dimensiones en conjunto — por ejemplo, que vas a medir su presencia "
                 "digital en cinco dimensiones distintas — sin explicar el concepto a "
@@ -88,10 +90,10 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
                 "(cuánto alcance tiene tu voz más allá de tu organización), e Higiene "
                 "(qué tan protegido está tu rastro digital). "
                 "INMEDIATAMENTE DESPUÉS de nombrar las cinco dimensiones (no antes, no "
-                "mezclado con la frase de gestos): explica que en sus resultados podrán "
-                "deslizar la mano a la izquierda o derecha para navegar entre ellas, y que "
-                "el pulgar arriba es para VER el detalle de la que les interese. Esta es la "
-                "ÚNICA mención de pulgar arriba en toda la locución. "
+                "mezclado con la frase de interacción inicial): explica que en sus "
+                "resultados podrán tocar las flechas para navegar entre ellas, y tocar "
+                "«Ver detalle» para profundizar en la que les interese. Esta es la "
+                "ÚNICA mención de cómo navegar en toda la locución. "
                 "Cierra explicando que al finalizar recibirán un radar personalizado, "
                 "un informe detallado y el resumen en su correo. Cierra dentro de la "
                 "MISMA locución con «¿Empezamos el análisis?» y PARA."

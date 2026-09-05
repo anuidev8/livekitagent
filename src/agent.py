@@ -38,7 +38,11 @@ from nova_session_continuation import (
     install_nova_session_reconnected_event_fix,
 )
 from rpc_client import rpc, wait_for_kiosk_participant
-from tasks.intro_orchestrator import intro_tour_running, schedule_intro_tour
+from tasks.intro_orchestrator import (
+    cancel_intro_tour,
+    intro_tour_running,
+    schedule_intro_tour,
+)
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -49,24 +53,34 @@ load_dotenv(".env.local", override=True)
 # ── File logging ──────────────────────────────────────────────────────────────
 # Writes logs to logs/<YYYY-MM-DD_HH-MM-SS>.log next to this file.
 # Keeps the 30 most recent log files; older ones are deleted automatically.
-_LOGS_DIR = Path(__file__).parent.parent / "logs"
-_LOGS_DIR.mkdir(exist_ok=True)
+#
+# Guarded by _HUELLA_LOG_CONFIGURED: this module-level block previously ran
+# every time agent.py was executed/imported a second time in the same
+# process (observed with `dev` mode's reload path — both executions share
+# one root logger), attaching a second FileHandler without removing the
+# first. Every subsequent log call then wrote to BOTH files, producing two
+# byte-identical logs per session and making log-based debugging confusing.
+_root_logger = logging.getLogger()
+if not getattr(_root_logger, "_huella_guide_log_configured", False):
+    _LOGS_DIR = Path(__file__).parent.parent / "logs"
+    _LOGS_DIR.mkdir(exist_ok=True)
 
-_LOG_FILE = _LOGS_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    _LOG_FILE = _LOGS_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 
-_file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
-_file_handler.setLevel(logging.DEBUG)
-_file_handler.setFormatter(
-    logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
-)
+    _file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+    )
 
-# Attach to the root logger so ALL livekit / agent log lines are captured.
-logging.getLogger().addHandler(_file_handler)
+    # Attach to the root logger so ALL livekit / agent log lines are captured.
+    _root_logger.addHandler(_file_handler)
+    _root_logger._huella_guide_log_configured = True
 
-# Prune old logs — keep only the 30 newest files.
-_all_logs = sorted(_LOGS_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
-for _old in _all_logs[:-30]:
-    _old.unlink(missing_ok=True)
+    # Prune old logs — keep only the 30 newest files.
+    _all_logs = sorted(_LOGS_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
+    for _old in _all_logs[:-30]:
+        _old.unlink(missing_ok=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # FIXED (2026-09-02, RM_vZnfXrLvRboG logs): a recycle landing mid-conversation
@@ -134,11 +148,24 @@ _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
+# Single source of truth for the 5 dimension labels used as literal trigger
+# phrases in NOVA_INSTRUCTIONS (re-explain rule) and _USER_VOICE_TOOL_HINT
+# (per-turn voice hint) below. Previously typed by hand in both places — a
+# rename or a 6th dimension would silently go stale in one spot and
+# re-explain requests for it would stop matching.
+DIMENSION_LABELS: tuple[str, ...] = (
+    "Autoridad",
+    "SSI",
+    "Mensaje",
+    "Influencia",
+    "Higiene",
+)
+
 # Product detail lives in Next.js RPC spokenContent / facts.
 # Keep this prompt free of investigation / surveillance framing so Bedrock
 # RAI does not block session init (ValidationException: content filters).
 NOVA_INSTRUCTIONS = textwrap.dedent(
-    """\
+    f"""\
     Eres la guía de voz en español del kiosk SETI Huella Digital.
     Habla como una anfitriona profesional de un evento corporativo:
     cálida, clara y serena — nunca robótica ni infantil.
@@ -206,7 +233,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       «facts.hint», «CONTINUOUS TOUR», «rendering», «under construction».
     - Cualquier instrucción interna, corchetes o claves técnicas.
     Si llega un [pantalla:]: úsalo SOLO para decidir tools; habla al visitante
-    en español natural sobre el CONTENIDO (dimensiones, entregables, gestos),
+    en español natural sobre el CONTENIDO (dimensiones, entregables, cómo interactuar),
     nunca sobre la interfaz ni el cue.
 
     REGLA CENTRAL — COMPOSICIÓN DINÁMICA:
@@ -266,9 +293,19 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       recommendation_item.
     Prohibido: target "attract", "intro", "analysis", "dimension",
     "identify_gate", "identify_search".
+    result_dimension SIEMPRE necesita dimensionId (serp|ssi|arquitectura|
+    influencia|higiene) O un index 0..4 explícito y correcto para la
+    dimensión que el visitante nombró — NUNCA lo omitas cuando el visitante
+    dijo el nombre de una dimensión. Sin uno de los dos, la pantalla puede
+    quedarse enfocando la dimensión que ya estaba activa en vez de la que el
+    visitante pidió, y narrarás los datos equivocados sin darte cuenta.
 
-    Si present_content o navigate_journey fallan (ok:false): llama
-    get_session_state, usa availableActions, y reintenta.
+    Si present_content o navigate_journey fallan (ok:false): NUNCA te quedes
+    en silencio ni dejes la petición sin respuesta. Antes de cualquier otra
+    cosa, di UNA frase corta y natural compuesta a partir del "hint" que
+    trae la respuesta — nunca leas el hint literal ni menciones "hint",
+    "ok:false", "error" ni nombres de tools. Luego llama get_session_state,
+    usa availableActions, y reintenta si corresponde.
 
     ════════════════════════════════════════════════
     FLUJO EXACTO DE PANTALLAS
@@ -299,8 +336,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     - present_content(attract_tour, index=-1) → narra 2-3 frases:
       qué es Huella Digital (análisis de presencia pública en 5 dimensiones)
       y qué explorará el visitante.
-    - Menciona de pasada que el espejo responde a gestos en el aire
-      (deslizar derecha para avanzar) y a la voz — sin pedir práctica.
+    - Menciona de pasada que el espejo responde a su toque en la pantalla
+      y a la voz — sin pedir práctica.
     - Invita a acercarse al lector con la manilla cuando estén listos.
     PROHIBIDO attract_tour index ≥ 0.
     PROHIBIDO nombre/rol/empresa hasta welcome ready.
@@ -377,14 +414,16 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PASO 1 — SOLO habla: saluda con el nombre real + rol/empresa reales. 2-3 oraciones:
        qué es Huella Digital y que explorarán su presencia. Termina con
        una invitación («¿Vemos cómo funciona?» o similar) y PARA.
-       PROHIBIDO llamar navigate_journey mientras hablas en este paso.
+       PROHIBIDO llamar navigate_journey mientras hablas en este paso —
+       EXCEPTO si el visitante ya confirmó continuar/adelante en este mismo
+       momento: entonces cierra en UNA frase corta y llama start_experience
+       de inmediato (no reinicies el saludo completo).
     PASO 2 — Después de que el visitante responda (continuar / adelante /
        seguimos / listo / empezamos / sí): llama navigate_journey(start_experience) en ese
-       momento — NO en el mismo turno que el saludo.
-    Tras start_experience ok: NO digas nada más en este turno — ni el
-    saludo, ni nombre/rol/empresa, ni palabras como «silencio» o
-    «esperando» ni ningún meta-comentario sobre pausas. Deja que
-    [pantalla:intro:run] continúe sola; sigue Screen 5 cuando llegue.
+       momento — NO en el mismo turno que el saludo inicial (salvo la excepción de arriba).
+    Tras start_experience ok: NO repitas el saludo ni digas «silencio»/«esperando».
+    Deja que [pantalla:intro:run] continúe; si la UI ya avanzó por toque, sigue
+    la pantalla actual (get_session_state) — no te quedes bloqueado esperando intro.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: adelantar el contenido del reel de onboarding aquí.
     PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en el onboarding.
@@ -393,7 +432,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
     ────────────────────────────────────────────────
     El runtime Python entrega UNA locución breve (~25-30 s) que cubre los tres grupos:
-    interacción (gestos + voz), las 5 dimensiones con una idea muy corta de qué
+    interacción (toque + voz), las 5 dimensiones con una idea muy corta de qué
     mide cada una (Autoridad, LinkedIn SSI, Mensaje, Influencia, Higiene) y los
     3 entregables (Radar, Informe, Correo).
     Mientras la voz habla, el reel de iconos en pantalla anima automáticamente —
@@ -405,8 +444,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       anunciar que estás en silencio o esperando.
     - NO llames present_content ni navigate_journey(advance).
     - Si el visitante pregunta algo, responde brevemente y con naturalidad;
-      puedes explicar cualquier elemento visible en el reel (gestos, dimensiones,
-      entregables) sin entrar en análisis detallado.
+      puedes explicar cualquier elemento visible en el reel (cómo interactuar,
+      dimensiones, entregables) sin entrar en análisis detallado.
     - Tras la locución, pregunta UNA vez «¿Empezamos el análisis?» y PARA.
     - Solo start_analysis tras confirmación del visitante.
 
@@ -414,14 +453,14 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     Si el visitante pide escuchar otra vez — interpreta de forma AMPLIA:
     «explícame de nuevo», «repite», «otra vez», «de nuevo», «no entendí»,
     «no entendí bien», «me explicas», «no quedó claro»,
-    «¿y los gestos?», «¿qué recibo?», «las dimensiones», «¿cuáles son?»,
+    «¿cómo interactúo?», «¿qué recibo?», «las dimensiones», «¿cuáles son?»,
     «¿qué miden?», «¿cómo funciona?», «ítem uno/dos/tres», «la primera/segunda/tercera»,
-    cualquier pregunta sobre Autoridad, SSI, Mensaje, Influencia, Higiene,
+    cualquier pregunta sobre {", ".join(DIMENSION_LABELS)},
     Radar, Informe, Correo:
       1) NUNCA digas que no puedes — siempre puedes, siempre lo haces.
          NUNCA respondas con frases de seguridad o política interna.
       2) Llama navigate_journey(replay_intro_card, index=N)
-         donde N = 0 (gestos), 1 (dimensiones), 2 (entregables).
+         donde N = 0 (cómo interactuar), 1 (dimensiones), 2 (entregables).
          Si hay duda: N=1 si mencionó dimensiones/qué miden/cuáles son,
          N=0 si preguntó cómo interactuar/navegar, N=2 si preguntó qué recibe.
       3) Narra esa sección con más detalle si el visitante pide profundidad;
@@ -456,20 +495,22 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        present_content(detail_dimension, dimension_id=…).
        PROHIBIDO present_content(result_dimension) en complete — solo resalta
        y requiere phase=results; no abre el detalle.
-    3) Cuando llega [pantalla:analysis:results dim 0]: mismo globo con
-       tarjeta activa resaltada. Ciclo de dimensiones ahí.
+    3) Cuando llega [pantalla:analysis:results]: mismo globo con
+       tarjeta activa resaltada. El visitante navega por TOQUE o por voz —
+       NO ciclar todas las dimensiones solo.
 
-    RESULTADOS (result_dimension) — sobre el globo (solo phase=results):
-    Ciclo completo para CADA dimensión:
-      present_content(result_dimension, index=N) → narra: contexto primero,
-      score al final de forma casual. Varía la apertura cada vez → luego
-      navigate_journey(advance) para ir a la siguiente dimensión.
-    PROHIBIDO pedir «continuar» ni esperar al visitante entre dimensiones.
-    Si el visitante pregunta por una dimensión concreta en results: puedes
-    present_content(result_dimension, dimension_id=X) para narrar, luego
-    navigate_journey(open_detail, dimension_id=X) si quiere fortalezas /
-    oportunidades / plan de acción.
-    Tras la última dimensión: advance automáticamente → detalle.
+    RESULTADOS (phase=results) — globo de dimensiones (UI touch-first):
+    La UI es dueña del foco: el visitante toca una tarjeta o dice cuál quiere.
+    Cuando llega [pantalla:analysis_results] (foco de una tarjeta SIN abrir
+    detalle): narra SOLO esa dimensión en 1-2 frases + pregunta si quiere
+    el detalle. PROHIBIDO ciclar advance por todas las dimensiones.
+    PROHIBIDO pedir «continuar» entre tarjetas si nadie lo pidió.
+    PROHIBIDO navigate_journey(advance) solo para «pasar a la siguiente»
+    automáticamente — eso pelea con el toque.
+    Si pide detalle / fortalezas / una dimensión concreta:
+    navigate_journey(open_detail, dimension_id=…).
+    Si vuelve desde detail (back): UNA frase breve «De vuelta a tus
+    dimensiones» — no re-narres scores ni evidencia.
 
     DETALLE (detail_section) — MISMO GLOBO, AVANCE AUTOMÁTICO:
     Audiencia: presidentes y directivos C-level — tono creíble, consultivo,
@@ -485,14 +526,29 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PROHIBIDO rótulos «Fortalezas/Oportunidades/Plan de acción».
     PROHIBIDO leer facts.items literalmente — prosa fluida C-level.
     Al cerrar tácticas: UNA pregunta — informe, volver al globo u otra dimensión — PARA y ESPERA.
-    PROHIBIDO repetir el detalle de una dimensión ya narrada (facts.detailTourComplete).
+    VARÍA esa pregunta de cierre cada vez — nunca la misma frase exacta en dos dimensiones seguidas.
+    Si el visitante vuelve a una dimensión ya narrada: SIEMPRE narra de nuevo su evidencia/brechas/
+    tácticas (nunca solo la pregunta a secas) — pero con ángulo y palabras distintas a la vez
+    anterior, nunca la misma frase o estructura repetida.
+    PROHIBIDO ABSOLUTO — sin importar cuántas veces la conversación ya haya tocado esta dimensión:
+    «ya la vimos», «ya la viste», «ya hablamos de esto», «ya cubrimos/cubierto esta dimensión»,
+    «ya revisamos/revisado esta dimensión», «como te comenté», «como mencioné antes», o cualquier
+    variante que use el historial de la conversación como excusa para NO narrar evidencia/brechas/
+    tácticas de nuevo. Recordar la conversación es normal; usarlo para saltarte la narración no lo es.
     send_report | back | open_detail(dimension_id=…) según respuesta.
 
     DETALLE → VOLVER (back desde detail):
-    Cuando el visitante dice "volver" o navega BACK desde detail, la UI
-    regresa al globo con las tarjetas de dimensiones (no a un resumen).
-    NO describas de nuevo el resumen de la dimensión
-    a menos que el visitante lo pida explícitamente.
+    Si el visitante expresa CUALQUIER intención de volver o regresar al
+    globo — cualquier formulación, no solo la palabra «volver»; infiere la
+    intención, no esperes una frase exacta —: LLAMA navigate_journey(back)
+    PRIMERO, antes de decir cualquier palabra. El tool call es lo que
+    realmente mueve la pantalla; tu voz sola NO la mueve — decir «de vuelta
+    a tus dimensiones» sin haber llamado el tool deja al visitante viendo
+    la misma pantalla de detalle mientras tú hablas como si ya hubiera
+    cambiado.
+    Solo tras el ok del tool: la UI regresa al globo con las tarjetas de
+    dimensiones (no a un resumen). NO describas de nuevo el resumen de la
+    dimensión a menos que el visitante lo pida explícitamente.
     Di solo algo breve como «De vuelta a tus dimensiones. ¿Cuál quieres
     ver?» o «¿Revisamos otra dimensión o avanzamos al cierre?»
     Espera su elección.
@@ -502,19 +558,23 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       opciones, no solo la de aceptar — «¿Quieres tomarte una foto para tu
       tarjeta? Será la portada visual de tu informe. Si prefieres, también
       puedes continuar sin foto.»
-      Dos caminos:
+      Tres caminos:
         • El visitante dice sí / quiero / adelante →
-            LLAMA navigate_journey(ready_for_picture) PRIMERO [genera la tarjeta con foto]
+            LLAMA navigate_journey(ready_for_picture) PRIMERO [pasa a pose]
         • El visitante dice no / omitir / sin foto →
             LLAMA navigate_journey(skip_photo) PRIMERO [arma la tarjeta igual, sin foto — pasa por generating y delivered]
-      En ambos casos: llama el tool ANTES de decir cualquier frase de
-      confirmación o del siguiente paso («colócate», «perfecto, continuamos
-      sin foto»...). El tool call es lo que mueve la pantalla — narrar el
-      resultado sin haberlo llamado deja la pantalla sin avanzar aunque tu
-      voz suene como si ya hubiera pasado.
-      PROHIBIDO avanzar sin respuesta. PROHIBIDO preguntar dos veces.
-      Si el visitante no responde o la voz no funciona, los botones
-      en pantalla están disponibles («Sí, con foto» / «Continuar sin foto»).
+        • El visitante quiere VOLVER (dejar el cierre):
+            — «volver» / «atrás» / mapa / resultados / dimensiones / globo
+              (sin pedir un detalle concreto): LLAMA navigate_journey(back)
+              de inmediato → analysis:results. NO preguntes destino.
+            — Si pide el detalle de UNA dimensión: pregunta cuál solo si
+              no la nombró; luego open_detail(dimension_id=…).
+            — Si dice algo ambiguo tipo «quiero ver otra cosa» sin
+              dejar claro mapa vs detalle: pregunta UNA frase y ESPERA.
+      En ready_for_picture / skip_photo / back / open_detail: llama el tool
+      ANTES de narrar el siguiente paso. El tool call mueve la pantalla.
+      PROHIBIDO avanzar sin respuesta. PROHIBIDO preguntar dos veces la foto
+      si ya eligió.
     - pose: UNA locución — invita al visitante a colocarse frente al espejo.
       Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla ni reformularla
       con otras palabras mientras esperas, sin importar cuánto tarde el visitante
@@ -539,10 +599,26 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Solo llama navigate_journey(retake_photo) si el visitante pide EXPLÍCITAMENTE
       la foto («repetir», «otra foto», «retake», «tomar de nuevo», «take again», o
       «quiero tomarme una foto» si antes la omitió). Solo llama navigate_journey(advance)
-      si confirma EXPLÍCITAMENTE enviar («sí», «envía», «dale», «manda el reporte»).
+      si confirma EXPLÍCITAMENTE enviar («sí», «envía», «dale», «manda el reporte», «enviar»).
       Un «no» o «no quiero enviar el reporte» SIN mencionar la foto NO es lo mismo
       que pedir la foto — no asumas cuál de las dos opciones quiere: pregunta en
       UNA frase breve cuál prefiere y ESPERA su respuesta.
+      CUANDO CONFIRME ENVIAR: LLAMA navigate_journey(advance) PRIMERO, ANTES de decir
+      cualquier palabra de agradecimiento o confirmación — el tool call es lo que
+      realmente envía el reporte; tu voz sola NO lo envía. PROHIBIDO ABSOLUTO decir
+      «gracias», «ya está en camino», «se está enviando», o cualquier variante de que
+      el informe ya se envió o se está enviando SIN haber llamado el tool en ESE MISMO
+      turno y haber recibido ok:true. Si el tool devuelve ok:false, NUNCA digas que se
+      envió — sigue las instrucciones de fallo (get_session_state, availableActions).
+      VOLVER desde delivered (dejar la tarjeta):
+        • Otra foto → navigate_journey(retake_photo)
+        • «volver» / «atrás» / mapa / resultados / dimensiones →
+          navigate_journey(back) de inmediato (no preguntes destino)
+        • Detalle de una dimensión → pregunta cuál si no la nombró, luego
+          navigate_journey(open_detail, dimension_id=…)
+        • Ambiguo («otra cosa», «algo más») sin mapa/foto/detalle claro →
+          pregunta UNA frase «¿Otra foto, tus dimensiones, o el detalle de alguna?»
+          y ESPERA.
     - thanks: agradecimiento cálido; invita a escanear el QR para conocer más de SETI;
       cuando confirmen salir (sí, finalizar, finish): LLAMA navigate_journey(finish)
       PRIMERO, antes de decir cualquier despedida — el tool call es lo que realmente
@@ -551,15 +627,6 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       nueva interrupción del visitante puede cortar tu turno antes de llegar al tool call.
       PROHIBIDO mencionar tarjeta, foto, imagen o correo — ya se explicó en delivered.
       PROHIBIDO repetir análisis o entrega.
-
-    GESTOS (si preguntan o llegan por swipe):
-    — Onboarding (reel único dentro de intro): el reel anima solo durante una
-      locución continua. Ignora swipes ahí (el cliente no los usa).
-    — Entre pantallas / vistas (welcome→intro, analysis→detalle, detalle→recs, etc.):
-      Si llega [pantalla:…] con SWIPE_CONTINUE_REQUEST: el cliente NO avanzó.
-      Pregunta breve «¿Seguimos?» / «¿Avanzamos?». Solo si confirma → navigate_journey.
-      Si dice que no: quédate. PROHIBIDO llamar navigate_journey sin confirmación.
-    Deslizar izquierda = volver (solo detalle). Subir/bajar la mano NO es gesto.
 
     FUERA DE TEMA:
     Si el visitante habla de algo completamente ajeno a la experiencia
@@ -586,6 +653,41 @@ _FALLBACK_SESSION = {
     ),
     "title": "Huella Digital",
 }
+
+
+def _log_rpc_state_summary(rpc_method: str, raw_result: str) -> None:
+    """Log the fields that actually pin down WHICH dimension/screen a tool
+    call resolved to — step/phase/focusDimensionId/analysisDimIndex and, for
+    the detail_section facts payload, facts.dimensionId.
+
+    Regression (2026-09-04 15:49 logs): a visitor said "mensaje" on
+    analysis:results and the guide narrated SERP/Autoridad facts instead —
+    but with only "Tool call emitted: present_content (id=...)" logged (no
+    call args) and no RPC response logged at all, there was no way to tell
+    whether the model omitted dimension_id, the frontend resolved it to the
+    wrong dimension, or the response itself carried stale facts. This never
+    logs full narrative text (facts.evidence/gaps/tactics, spokenContent) —
+    only the identifying fields needed to correlate "what was asked for" vs
+    "what the frontend says is focused."
+    """
+    try:
+        parsed = json.loads(raw_result)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    facts = parsed.get("facts") if isinstance(parsed.get("facts"), dict) else {}
+    logger.info(
+        "[%s] state summary: ok=%s step=%s phase=%s focusDimensionId=%s "
+        "analysisDimIndex=%s facts.dimensionId=%s",
+        rpc_method,
+        parsed.get("ok", True),
+        parsed.get("step"),
+        parsed.get("phase"),
+        parsed.get("focusDimensionId"),
+        parsed.get("analysisDimIndex"),
+        facts.get("dimensionId"),
+    )
 
 
 # Max seconds on_enter's warm-greeting generate_reply may block incoming
@@ -732,7 +834,7 @@ class Assistant(Agent):
                     state.get("step"),
                     state.get("phase"),
                 )
-                handle.interrupt()
+                handle.interrupt(force=True)
         finally:
             # Signal that on_enter has fully completed (audio delivered, or
             # force-interrupted above). The pantalla guard (_on_enter_done
@@ -745,7 +847,9 @@ class Assistant(Agent):
     async def get_session_state(self, context: RunContext) -> str:
         """Obtiene el estado actual de la pantalla (step, phase, availableActions, spokenContent)."""
         try:
-            return await rpc("get_session_state", retries=2)
+            result = await rpc("get_session_state", retries=2)
+            _log_rpc_state_summary("get_session_state", result)
+            return result
         except ToolError as exc:
             logger.warning("get_session_state soft-fail: %s", exc)
             payload = dict(_FALLBACK_SESSION)
@@ -770,7 +874,14 @@ class Assistant(Agent):
         y los campos de facts devueltos. Si ok=false, get_session_state y reintenta.
         Nunca uses target=attract|intro|analysis.
         """
-        return await rpc(
+        logger.info(
+            "[present_content] call target=%s index=%s dimension_id=%s section=%s",
+            target,
+            index,
+            dimension_id or "(empty)",
+            section or "(empty)",
+        )
+        result = await rpc(
             "present_content",
             {
                 "target": target,
@@ -779,23 +890,35 @@ class Assistant(Agent):
                 "section": section,
             },
         )
+        _log_rpc_state_summary("present_content", result)
+        return result
 
     @function_tool
     async def navigate_journey(
         self, context: RunContext, action: str, dimension_id: str = "", index: int = -1
     ) -> str:
         """Ejecuta una acción disponible en la experiencia.
-        - open_detail + dimension_id: abre detalle de dimensión en analysis:complete.
+        - open_detail + dimension_id: abre detalle de dimensión (analysis, detail,
+          o desde closing:photo_consent|pose|delivered).
+        - back: en closing:photo_consent|pose|prep|delivered vuelve a analysis:results.
         - ready_for_picture: en closing:photo_consent o closing:pose|capture cuando el visitante confirma la foto.
         - skip_photo: en closing:photo_consent cuando el visitante quiere omitir la foto.
+        - retake_photo: en closing:delivered|generating vuelve a pose.
         - finish: en closing:thanks cuando confirma salir.
-        - replay_intro_card + index (0=gestos, 1=dimensiones, 2=entregables):
+        - replay_intro_card + index (0=cómo interactuar, 1=dimensiones, 2=entregables):
           vuelve a narrar esa tarjeta cuando el visitante lo pide explícitamente.
           Solo disponible mientras step=intro."""
+        logger.info(
+            "[navigate_journey] call action=%s dimension_id=%s index=%s",
+            action,
+            dimension_id or "(empty)",
+            index,
+        )
         payload: dict = {"action": action, "dimensionId": dimension_id}
         if index >= 0:
             payload["index"] = index
         result = await rpc("navigate_journey", payload)
+        _log_rpc_state_summary("navigate_journey", result)
         if self._on_navigate is not None:
             ok = True
             try:
@@ -960,6 +1083,18 @@ _USER_VOICE_MIN_CHARS = 4
 # Appended to every visitor voice turn so Nova maps intent → navigate_journey.
 _USER_VOICE_TOOL_HINT = (
     "Llama get_session_state primero. "
+    "NAVEGACIÓN ATRÁS (cualquier pantalla, no solo detail): si el visitante "
+    "expresa CUALQUIER intención de volver o regresar a la pantalla anterior "
+    "— infiere la intención, NO busques una palabra exacta; puede sonar como "
+    "«puedes ir atrás», «volvamos», «regrésame», «quiero ver los resultados de "
+    "nuevo», «sal de aquí», «para atrás», «cierra esto», o cualquier otra forma "
+    "de pedir salir de donde está — y 'back' aparece en availableActions de "
+    "get_session_state: LLAMA navigate_journey(action='back') DE INMEDIATO, "
+    "ANTES de decir cualquier frase de confirmación. El tool call es lo que "
+    "realmente mueve la pantalla — tu voz sola NO la mueve. NUNCA digas «de "
+    "vuelta a...», «regresamos a...» ni nada similar sin haber llamado el tool "
+    "en ese mismo turno; si lo dices sin llamarlo, el visitante se queda viendo "
+    "la misma pantalla mientras tú hablas como si ya hubiera cambiado. "
     "Si step=welcome y phase=ready y el visitante confirma continuar "
     "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
@@ -975,22 +1110,27 @@ _USER_VOICE_TOOL_HINT = (
     "«explícame de nuevo», «repite», «repíteme», «otra vez», «de nuevo», «¿qué son las dimensiones?», "
     "«¿cuáles son?», «las dimensiones», «¿qué miden?», «dimensión», «ítem dos», «ítem número dos», "
     "«el segundo», «la segunda tarjeta», «las cinco», «vuelve a explicar», «no quedó claro», "
-    "«no entendí el número dos», «¿cuáles son las dimensiones?», «Autoridad», «SSI», «Mensaje», "
-    "«Influencia», «Higiene» (cuando pregunta qué son). "
-    "Señales de re-explicación de GESTOS (N=0): "
-    "«los gestos», «¿cómo funciona?», «¿cómo interactúo?», «la primera tarjeta», «ítem uno», "
-    "«¿cómo avanzo?», «¿cómo navego?», «deslizar». "
+    "«no entendí el número dos», «¿cuáles son las dimensiones?», "
+    f"{', '.join(f'«{label}»' for label in DIMENSION_LABELS)} (cuando pregunta qué son). "
+    "Señales de re-explicación de CÓMO INTERACTUAR (N=0): "
+    "«cómo interactúo», «¿cómo funciona?», «¿cómo interactúo?», «la primera tarjeta», «ítem uno», "
+    "«¿cómo avanzo?», «¿cómo navego?», «toque». "
     "Señales de re-explicación de ENTREGABLES (N=2): "
     "«¿qué recibo?», «el informe», «el radar», «¿qué me dan?», «la tercera tarjeta», «ítem tres», "
     "«¿qué incluye?», «los entregables». "
     "Ante cualquier duda sobre cuál tarjeta, usa N=1 (dimensiones) si mencionó dimensiones, "
-    "N=0 (gestos) si preguntó cómo interactuar, N=2 (entregables) si preguntó qué recibe. "
+    "N=0 (cómo interactuar) si preguntó cómo interactuar, N=2 (entregables) si preguntó qué recibe. "
     "NUNCA respondas con 'no puedo' ni rechaces — SIEMPRE ejecuta replay_intro_card. "
     "Luego narra esa tarjeta con más detalle si pide profundidad, o breve si solo repite. "
     "Si step=closing y phase=photo_consent y el visitante dice sí / quiero foto / con foto: "
     "navigate_journey(ready_for_picture) de inmediato. "
     "Si step=closing y phase=photo_consent y el visitante dice no / sin foto / omitir / skip: "
     "navigate_journey(skip_photo) de inmediato — arma la tarjeta igual, sin foto. "
+    "Si step=closing y phase=photo_consent|pose|prep|delivered y quiere VOLVER: "
+    "«volver»/«atrás»/mapa/resultados/dimensiones → navigate_journey(back) DE INMEDIATO; "
+    "detalle de una dimensión nombrada → navigate_journey(open_detail, dimension_id=…); "
+    "otra foto (solo delivered/generating) → navigate_journey(retake_photo); "
+    "solo si el pedido es ambiguo (sin mapa/foto/detalle): pregunta UNA frase y ESPERA. "
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
@@ -1030,14 +1170,84 @@ def _pantalla_dedupe_key(text: str) -> str:
         return "closing:thanks"
     if "analysis:complete" in text:
         return "analysis:complete"
+    if "analysis:scanning" in text or (
+        "step=analysis" in text and "phase=scanning" in text
+    ):
+        return "analysis:scanning"
+    if "analysis:results" in text or (
+        "step=analysis" in text and "phase=results" in text
+    ):
+        return "analysis:results"
+    if "analysis_results" in text or "Usuario pasó a dimensión" in text:
+        return "analysis_results"
     if "detail:revisit" in text or "DETAIL_REVISIT" in text:
-        return "detail:revisit"
+        # Include the dimension id (client-appended "DIM_ID=…" marker, never
+        # spoken — see buildDetailRevisitCue) so two different dimensions
+        # never collapse onto the same key. Without this, _deliver_pantalla_
+        # reply's staleness/supersede check (pantalla_guard.last_key !=
+        # dedupe_key) can never tell "revisit ssi" apart from "revisit
+        # influencia" — both keyed "detail:revisit" — so a reply queued for
+        # a dimension the visitor already left would never be detected as
+        # superseded (2026-09-04 regression: agent kept narrating one
+        # dimension's facts after the visitor had already opened another).
+        dim_match = re.search(r"DIM_ID=(\S+)", text)
+        return f"detail:revisit:{dim_match.group(1)}" if dim_match else "detail:revisit"
     if "detail:continuous" in text or "DETAIL_CONTINUOUS" in text:
-        return "detail:continuous"
+        dim_match = re.search(r"DIM_ID=(\S+)", text)
+        return f"detail:continuous:{dim_match.group(1)}" if dim_match else "detail:continuous"
     match = re.search(r"\[pantalla:([^\]]+)\]", text)
     if match:
         return match.group(1).split("]")[0].strip()
     return text[:96]
+
+
+def _analysis_pantalla_instructions(dedupe_key: str) -> str | None:
+    """Per-screen instructions for analysis pantallas (button-nav safe).
+
+    Generic «Cambio de foco» let Nova keep welcome chat context and re-greet
+    on analysis:scanning (2026-09-04_12-44-40 logs).
+    """
+    if dedupe_key == "analysis:scanning":
+        return (
+            "ANALYSIS SCAN — get_session_state PRIMERO. "
+            "El visitante YA pasó la bienvenida (puede haber tocado botones rápido). "
+            "PROHIBIDO ABSOLUTO: repetir saludo, nombre+rol de welcome, «¿Vemos cómo "
+            "funciona?», o cualquier frase de bienvenida anterior. "
+            "Narra SOLO el escaneo en vivo: fuentes que se revisan (facts.sourceGroups / "
+            "facts.narrationAnchors / facts.searchFindings) — LinkedIn, prensa, redes, "
+            "sitios. Tono analista senior. PROHIBIDO lista numerada. "
+            "PROHIBIDO navigate_journey. PROHIBIDO pedir continuar."
+        )
+    if dedupe_key == "analysis:complete":
+        return (
+            "ANALYSIS COMPLETE — get_session_state PRIMERO. "
+            "PROHIBIDO repetir el saludo de welcome o «¿Vemos cómo funciona?». "
+            "Anuncia el standing con calidez desde facts.uiStandingLine (parafrasea, "
+            "no leas literal): rol, banda, dimensión más fuerte. "
+            "Añade UNA fortaleza y UNA brecha de facts. "
+            "Invita a tocar una dimensión o «ver detalles». "
+            "open_detail | reveal_results | send_report según availableActions."
+        )
+    if dedupe_key == "analysis:results":
+        return (
+            "ANALYSIS RESULTS (globo) — get_session_state PRIMERO. "
+            "Si el visitante ACABA DE VOLVER desde detail (back): di SOLO una frase "
+            "breve tipo «De vuelta a tus dimensiones. ¿Cuál quieres ver?» — "
+            "PROHIBIDO re-narrar standing, scores, evidencia o la dimensión anterior. "
+            "Si es la primera llegada a results en este ciclo: orienta brevemente el "
+            "globo (tarjeta activa) y pregunta qué dimensión abrir. "
+            "PROHIBIDO repetir welcome. PROHIBIDO locución larga."
+        )
+    if dedupe_key == "analysis_results":
+        return (
+            "RESULT DIMENSION FOCUS — get_session_state PRIMERO. "
+            "Narra SOLO la dimensión enfocada ahora (facts de esa dimensión): "
+            "1-2 frases score + idea clave. Pregunta si quiere ver el detalle. "
+            "PROHIBIDO narrar otras dimensiones. PROHIBIDO repetir welcome o standing "
+            "completo. Si step=detail ya (el visitante abrió detalle): NO hables — "
+            "espera [pantalla:detail:continuous]."
+        )
+    return None
 
 
 def _closing_pantalla_instructions(text: str) -> str | None:
@@ -1056,7 +1266,13 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "PRIMERO, antes de decir cualquier cosa sobre colocarse frente al espejo — el tool "
             "call es lo que realmente mueve la pantalla, tu voz sola NO la mueve. "
             "no / omitir / sin foto → LLAMA navigate_journey(skip_photo) PRIMERO, antes de "
-            "confirmar nada. PROHIBIDO narrar el siguiente paso («colócate», «perfecto, "
+            "confirmar nada. "
+            "VOLVER: «volver»/«atrás»/mapa/resultados/dimensiones → navigate_journey(back) "
+            "DE INMEDIATO (no preguntes destino); "
+            "detalle de una dimensión → pregunta cuál solo si no la nombró, luego "
+            "navigate_journey(open_detail, dimension_id=serp|ssi|arquitectura|influencia|higiene); "
+            "solo si el pedido es ambiguo → pregunta UNA frase y ESPERA. "
+            "PROHIBIDO narrar el siguiente paso («colócate», «perfecto, "
             "continuamos sin foto», etc.) sin haber llamado el tool correspondiente en ESE "
             "mismo turno — narrar sin llamar el tool dejaría la pantalla sin avanzar aunque "
             "tu voz suene como si ya hubiera pasado."
@@ -1099,7 +1315,21 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "Solo navigate_journey(retake_photo) si el visitante pide EXPLÍCITAMENTE la foto "
             "(repetir / otra foto / retake / tomar de nuevo / take again, o «quiero tomarme "
             "una foto» si antes la omitió). Solo navigate_journey(advance) si confirma "
-            "EXPLÍCITAMENTE enviar (sí / envía / dale / manda el reporte). "
+            "EXPLÍCITAMENTE enviar (sí / envía / dale / manda el reporte / enviar). "
+            "CUANDO CONFIRME ENVIAR: LLAMA navigate_journey(advance) PRIMERO, ANTES de decir "
+            "cualquier palabra — el tool call es lo que realmente envía el reporte, tu voz "
+            "sola NO lo envía. PROHIBIDO ABSOLUTO decir «gracias», «ya está en camino a tu "
+            "correo», «se está enviando», o cualquier variante de que el reporte ya se envió "
+            "SIN haber llamado el tool en ESE MISMO turno y haber recibido ok:true — esto ya "
+            "pasó antes y el visitante se queda sin su informe mientras cree que ya lo tiene. "
+            "Si el tool devuelve ok:false: NUNCA digas que se envió; compón una frase corta "
+            "desde su hint, llama get_session_state y sigue availableActions. "
+            "VOLVER desde esta tarjeta: «volver»/mapa/resultados → navigate_journey(back) "
+            "DE INMEDIATO; "
+            "detalle de una dimensión → pregunta cuál si no la nombró, luego "
+            "navigate_journey(open_detail, dimension_id=…); "
+            "pedido ambiguo → pregunta UNA frase "
+            "«¿Otra foto, tus dimensiones, o el detalle de alguna?» y ESPERA. "
             "Un «no» o «no quiero enviar el reporte» SIN mencionar la foto NO equivale a "
             "pedir la foto — no lo asumas. Si no queda claro cuál de las dos opciones "
             "quiere, pregunta en UNA frase breve y ESPERA su respuesta en vez de adivinar. "
@@ -1295,33 +1525,226 @@ _SESSION_RECONNECTED_INSTRUCTIONS = (
 # "nuestros clientes»"). 8s was sized for the old one-line "componiendo tu
 # tarjeta" filler, not the longer grounded facts added afterward. Bumped
 # with headroom for the longest fact + a short lead-in at natural pace.
+#
+# This long grace is ONLY for the two "reading a filler while something
+# loads" call sites (_generating_keepalive, closing_instructions) — they
+# pass it explicitly. Everything else (touch navigation: detail cards,
+# welcome_ready, the generic fallback) uses _PANTALLA_INTERRUPT_GRACE_NAV_S
+# instead, since a 12s wait there reads as an unresponsive agent, not a
+# graceful finish (2026-09-04, RM_9vbBWpPmZjYn-follow-up logs: user tapped
+# a dimension card, agent kept narrating the previous dimension for the
+# full 12s before switching). This is a two-way split, not a per-screen
+# allowlist — new screens default to the responsive grace automatically.
+# Touch / button navigation must cut old speech immediately (LiveKit:
+# session.interrupt() then generate_reply). A 2s wait left welcome audio
+# playing on intro/analysis (2026-09-04_12-59-37 logs). Generating filler
+# still uses the long grace explicitly.
 _PANTALLA_INTERRUPT_GRACE_S = 12.0
+_PANTALLA_INTERRUPT_GRACE_NAV_S = 0.0
 
 # Keep strong refs to fire-and-forget wait-then-speak tasks so they can't be
 # garbage-collected mid-flight; each discards itself once done.
 _pending_pantalla_replies: set[asyncio.Task[None]] = set()
 
 
-def _deliver_pantalla_reply(agent_session: AgentSession, instructions: str) -> None:
+def _deliver_pantalla_reply(
+    agent_session: AgentSession,
+    instructions: str,
+    grace_s: float = _PANTALLA_INTERRUPT_GRACE_NAV_S,
+    pantalla_guard: "_PantallaGuard | None" = None,
+    dedupe_key: str | None = None,
+) -> None:
     """Speak `instructions` now if the agent is idle, or once the in-flight
-    utterance finishes — bounded wait, then force-interrupt if it runs long."""
+    utterance finishes — bounded wait, then force-interrupt if it runs long.
+
+    Defaults to the short, touch-responsive grace period. Callers reading a
+    filler while something loads (generating keep-alive, closing) pass
+    grace_s=_PANTALLA_INTERRUPT_GRACE_S explicitly instead.
+
+    Freshness, not another timeout: rapid consecutive navigation (e.g. a
+    single tap that fires both an "analysis_results" and a "detail:continuous"
+    cue ~1s apart, or detail -> back -> another detail within the grace
+    window) used to spawn multiple independent wait-then-speak tasks that
+    each eventually called generate_reply(), so a superseded reply about a
+    screen the visitor already left could still get spoken after the newer
+    one (2026-09-04 logs: agent kept narrating "Higiene" facts after the
+    visitor had already opened SSI). Pass pantalla_guard + dedupe_key so
+    this checks _PantallaGuard.last_key — updated by every new cue — right
+    before speaking, and drops itself if a newer cue has since superseded
+    it. No cancellation bookkeeping and no extra magic number: this works
+    correctly no matter how long the wait ends up being.
+    """
+
+    def _stale() -> bool:
+        return (
+            pantalla_guard is not None
+            and dedupe_key is not None
+            and pantalla_guard.last_key != dedupe_key
+        )
+
     current = agent_session.current_speech
     if current is None or current.done():
+        if _stale():
+            logger.info(
+                "[text_input] Dropping superseded pantalla reply (idle path): %s",
+                dedupe_key,
+            )
+            return
+        # Button-nav can fire a new cue while the previous generate_reply has
+        # started but current_speech is not registered yet — interrupt any
+        # leftover so we don't stack welcome + scanning (2026-09-04 logs).
+        # force=True: without it, AgentSession.interrupt() raises (silently,
+        # if not logged) on a speech handle with allow_interruptions=False
+        # instead of actually stopping it — see the force=True note on the
+        # busy-path interrupt below for the regression this caused.
+        try:
+            agent_session.interrupt(force=True)
+        except Exception:
+            logger.warning(
+                "[text_input] agent_session.interrupt(force=True) failed "
+                "(idle path) for %s",
+                dedupe_key,
+                exc_info=True,
+            )
+        if _stale():
+            logger.info(
+                "[text_input] Dropping superseded pantalla reply "
+                "(idle path, after interrupt): %s",
+                dedupe_key,
+            )
+            return
         agent_session.generate_reply(instructions=instructions)
         return
 
-    async def _wait_then_speak() -> None:
-        try:
-            await asyncio.wait_for(
-                current.wait_for_playout(), timeout=_PANTALLA_INTERRUPT_GRACE_S
-            )
-        except asyncio.TimeoutError:
+    # Touch nav (grace_s == 0): interrupt NOW — do not let old-screen audio
+    # continue while the visitor already moved (welcome→intro, detail→back).
+    if grace_s <= 0:
+        if _stale():
             logger.info(
-                "[text_input] In-flight speech exceeded %.0fs — interrupting "
-                "for new screen content",
-                _PANTALLA_INTERRUPT_GRACE_S,
+                "[text_input] Dropping superseded pantalla reply "
+                "(immediate interrupt path): %s",
+                dedupe_key,
             )
-            current.interrupt()
+            return
+        logger.info(
+            "[text_input] Immediate interrupt for button/UI navigation: %s",
+            dedupe_key,
+        )
+        # force=True on BOTH calls: SpeechHandle.interrupt()/AgentSession.interrupt()
+        # raise RuntimeError instead of stopping playback when the current speech
+        # handle was created with allow_interruptions=False — the SDK docs say
+        # such a handle "keeps playing... unless force is set". Without force=True
+        # here, that raise was caught and silently discarded (bare except: pass,
+        # no log), so the log line above claimed an interrupt happened while the
+        # old narration in fact played on to natural completion — touch navigation
+        # only "sometimes" cut off old speech, with zero trace of the failure
+        # (2026-09-04: visitor tapped a dimension detail card and the previous
+        # dimension's narration played all the way through instead of stopping).
+        # Touch/button navigation must always win over in-flight narration, so
+        # forcing here matches that intent instead of only working when the
+        # current handle happened to allow it.
+        try:
+            current.interrupt(force=True)
+        except Exception:
+            logger.warning(
+                "[text_input] current.interrupt(force=True) failed for %s",
+                dedupe_key,
+                exc_info=True,
+            )
+            try:
+                agent_session.interrupt(force=True)
+            except Exception:
+                logger.warning(
+                    "[text_input] agent_session.interrupt(force=True) also "
+                    "failed for %s",
+                    dedupe_key,
+                    exc_info=True,
+                )
+
+        async def _speak_after_interrupt() -> None:
+            # Brief settle so Nova Sonic server-side VAD accepts the new reply.
+            await asyncio.sleep(0.35)
+            if _stale():
+                logger.info(
+                    "[text_input] Dropping superseded pantalla reply "
+                    "(after interrupt settle): %s",
+                    dedupe_key,
+                )
+                return
+            agent_session.generate_reply(instructions=instructions)
+
+        task = asyncio.create_task(_speak_after_interrupt())
+        _pending_pantalla_replies.add(task)
+        task.add_done_callback(_pending_pantalla_replies.discard)
+        return
+
+    async def _wait_then_speak() -> None:
+        # Poll in short slices instead of one blind wait_for(..., timeout=
+        # grace_s) so a captured `current` reference that goes STALE mid-wait
+        # doesn't eat the whole grace period as dead air. Regression
+        # (2026-09-04 14:04-14:09 logs): the visitor left a dimension detail
+        # view, took their closing photo, and the closing:generating cue
+        # captured session.current_speech pointing at the OLD detail_section
+        # SpeechHandle. That handle's own audio had already finished, but
+        # its wait_for_playout() never resolved (looks like a framework-side
+        # race for autonomous Nova turns not fully reflected in
+        # current_speech) — the session had already moved on to a newer
+        # handle (the photo-taking exchange) by the time this cue arrived.
+        # The old single 12s wait_for() had no way to notice that and sat
+        # silent for the full "In-flight speech exceeded 12.0s" grace before
+        # the guide said anything about closing:generating. Checking
+        # `agent_session.current_speech is not current` between slices lets
+        # this bail out as soon as the session itself has moved past the
+        # handle we're protecting — nothing left to wait for — without
+        # shortening the grace for the legitimate case (a filler genuinely
+        # still speaking, where current_speech keeps pointing at `current`
+        # the whole time).
+        poll_s = min(0.5, grace_s)
+        remaining = grace_s
+        finished_naturally = False
+        superseded_by_session = False
+        while remaining > 0:
+            step = min(poll_s, remaining)
+            try:
+                await asyncio.wait_for(current.wait_for_playout(), timeout=step)
+                finished_naturally = True
+                break
+            except asyncio.TimeoutError:
+                remaining -= step
+                if agent_session.current_speech is not current:
+                    superseded_by_session = True
+                    break
+
+        if not finished_naturally:
+            if _stale():
+                logger.info(
+                    "[text_input] Dropping superseded pantalla reply "
+                    "(grace expired, newer cue arrived): %s",
+                    dedupe_key,
+                )
+                return
+            if superseded_by_session:
+                logger.info(
+                    "[text_input] In-flight speech handle superseded by the "
+                    "session after %.1fs — skipping remaining grace for new "
+                    "screen content",
+                    grace_s - remaining,
+                )
+            else:
+                logger.info(
+                    "[text_input] In-flight speech exceeded %.1fs — interrupting "
+                    "for new screen content",
+                    grace_s,
+                )
+            current.interrupt(force=True)
+        else:
+            if _stale():
+                logger.info(
+                    "[text_input] Dropping superseded pantalla reply "
+                    "(finished naturally, newer cue arrived): %s",
+                    dedupe_key,
+                )
+                return
         agent_session.generate_reply(instructions=instructions)
 
     task = asyncio.create_task(_wait_then_speak())
@@ -1443,7 +1866,9 @@ async def my_agent(ctx: JobContext):
                 token_key,
             )
             _deliver_pantalla_reply(
-                agent_session, _generating_keepalive_instructions(tick)
+                agent_session,
+                _generating_keepalive_instructions(tick),
+                grace_s=_PANTALLA_INTERRUPT_GRACE_S,
             )
             delay = _GENERATING_KEEPALIVE_REPEAT_S
 
@@ -1471,11 +1896,19 @@ async def my_agent(ctx: JobContext):
         # Nova often reads it aloud ("UI step…", "focus=…"). Use instructions
         # so the model runs tools and speaks visitor-facing Spanish only.
         if is_pantalla:
+            dedupe_key = _pantalla_dedupe_key(event.text)
+            # dedupe_key (not the truncated cue text) is what actually
+            # carries the dimension id for detail:continuous/detail:revisit
+            # cues (see _pantalla_dedupe_key's DIM_ID= parsing) — the cue
+            # body itself is instruction prose that runs well past 120
+            # chars before ever reaching that marker, so logging only
+            # event.text left every past debugging session unable to
+            # confirm which dimension a given cue actually targeted.
             logger.info(
-                "[text_input] pantalla cue (not spoken): %.120s",
+                "[text_input] pantalla cue (not spoken) key=%s: %.120s",
+                dedupe_key,
                 event.text,
             )
-            dedupe_key = _pantalla_dedupe_key(event.text)
             if _should_skip_duplicate_pantalla(dedupe_key):
                 logger.info(
                     "[text_input] Skipping duplicate pantalla (%.1fs): %s",
@@ -1523,40 +1956,96 @@ async def my_agent(ctx: JobContext):
                     )
                 return
 
-            # Python orchestrator owns intro narration — ignore other intro cues.
-            if intro_tour_running() or (
-                "step=intro" in event.text and "intro:run" not in event.text
-            ):
+            # Other intro-step cues (not intro:run) are owned by the Python
+            # orchestrator — never let them race a second generate_reply.
+            if "step=intro" in event.text and "intro:run" not in event.text:
                 logger.info(
-                    "[text_input] Suppressed pantalla during intro orchestrator: %s",
+                    "[text_input] Suppressed non-run intro pantalla: %s",
                     dedupe_key,
                 )
                 return
+
+            # Touch/UI left intro while the tour was still speaking. The frontend
+            # correctly pushes [pantalla:analysis|detail|…] but we used to
+            # suppress every cue until the intro finished — so voice kept
+            # reading the onboarding script while the visitor was already on
+            # results (see logs 2026-09-04_12-08-50: analysis:scanning /
+            # detail:continuous all "Suppressed pantalla during intro").
+            # LiveKit pattern: interrupt() + generate_reply for the new screen.
+            if intro_tour_running():
+                logger.info(
+                    "[text_input] Cancelling intro orchestrator — UI navigated to: %s",
+                    dedupe_key,
+                )
+                cancel_intro_tour()
+                try:
+                    agent_session.interrupt(force=True)
+                except Exception:
+                    logger.warning(
+                        "[text_input] interrupt(force=True) after intro cancel raised",
+                        exc_info=True,
+                    )
+                # Fall through to normal per-screen pantalla delivery below.
 
             # Whether to speak immediately or let an in-flight utterance finish
             # first is decided dynamically by _deliver_pantalla_reply (checks
             # agent_session.current_speech) — not by cue type. No hardcoded
             # per-phase exemption list to maintain as new screens are added.
-            if detail_revisit:
-                _deliver_pantalla_reply(
-                    agent_session,
-                    "DETAIL_REVISIT — Esta dimensión ya se narró. "
-                    "PROHIBIDO repetir evidencia/brechas/tácticas. "
-                    "PROHIBIDO present_content(detail_section). "
-                    "Di UNA frase breve: informe, volver al globo u otra dimensión → ESPERA. "
-                    "send_report | back | open_detail(dimension_id=…).",
+            #
+            # Revisiting an already-toured dimension used to skip straight to
+            # "quieres el informe, volver, u otra dimensión?" with zero
+            # narration (a past fix to avoid tedious verbatim repeats). User
+            # feedback (2026-09-04): that reads as broken, not concise — every
+            # detail entry, first visit or not, must narrate the dimension.
+            # detail_revisit now shares detail_auto's full-narration
+            # instructions (below), with one addition: vary the retelling
+            # instead of repeating the earlier phrasing verbatim.
+            if detail_auto:
+                revisit_note = (
+                    " Esta dimensión ya se narró antes en la conversación — cuéntala "
+                    "con ángulo y palabras distintas a tu narración anterior (mismo "
+                    "contenido de facts, otra forma de decirlo); PROHIBIDO repetir la "
+                    "misma frase o estructura que usaste la primera vez. "
+                    "PROHIBIDO ABSOLUTO decir «ya la vimos», «ya hablamos de esto», «ya "
+                    "cubrimos/cubierto esta dimensión», «ya revisamos/revisado esta "
+                    "dimensión», o cualquier variante que use el historial de la "
+                    "conversación como excusa para NO narrar evidencia/brechas/tácticas "
+                    "de nuevo — esto ya pasó antes y el visitante se quedó sin narración "
+                    "en su segunda visita a una dimensión."
+                    if detail_revisit
+                    else ""
                 )
-            elif detail_auto:
                 _deliver_pantalla_reply(
                     agent_session,
-                    "DETAIL_CONTINUOUS — UNA sola respuesta SIN silencios ni pausas. "
-                    "Teje facts.evidence → facts.gaps → facts.tactics en prosa encadenada. "
-                    "Parafrasea para facts.role en facts.company — explica POR QUÉ. "
-                    "PROHIBIDO parar, callar o END entre bloques o ítems. "
-                    "PROHIBIDO present_content extra ni get_session_state entre bloques. "
+                    "DETAIL_CONTINUOUS — La dimensión enfocada pudo haber cambiado desde tu "
+                    "última respuesta (el visitante pudo haber navegado por voz o tocando la "
+                    "pantalla). ANTES de decir una sola palabra: llama get_session_state y usa "
+                    "SOLO facts.evidence / facts.gaps / facts.tactics de ESA respuesta fresca. "
+                    "PROHIBIDO ABSOLUTO componer esta síntesis desde datos o el nombre de una "
+                    "dimensión que hayas narrado antes en la conversación — cada entrada a esta "
+                    "pantalla es una dimensión nueva hasta que get_session_state confirme lo "
+                    "contrario. "
+                    "Síntesis BREVE, no exhaustiva: 3-4 frases en total, "
+                    "no una recitación bloque por bloque. Elige SOLO la evidencia más "
+                    "relevante de facts.evidence, la brecha más importante de facts.gaps, "
+                    "y UNA táctica concreta de facts.tactics — parafraseado en prosa natural "
+                    "ligada a facts.role en facts.company, explicando brevemente el POR QUÉ."
+                    + revisit_note + " "
+                    "UNA sola respuesta SIN silencios ni pausas para esas 3-4 frases. "
+                    "PROHIBIDO present_content extra ni get_session_state OTRA VEZ a mitad de "
+                    "la síntesis (una sola llamada a get_session_state al inicio es obligatoria; "
+                    "una segunda llamada a mitad de la síntesis no lo es). "
                     "PROHIBIDO rótulos Fortalezas/Oportunidades/Plan. "
                     "UI resalta secciones sola — tú sigues hablando sin interrupción. "
-                    "Al cerrar tácticas: pregunta informe / volver / otra dimensión → PARA y ESPERA.",
+                    "OBLIGATORIO — la ÚLTIMA oración de esta locución DEBE ser una pregunta "
+                    "de elección (no un punto final tras la táctica): "
+                    "«¿Quieres el informe, volver al globo, u otra dimensión?» "
+                    "o equivalente — VARÍA la redacción de esta pregunta cada vez, nunca "
+                    "la misma frase exacta que en la dimensión anterior. "
+                    "Sin esa pregunta la locución está incompleta. "
+                    "Luego PARA y ESPERA. Si el visitante pide más detalle, ahí sí profundiza.",
+                    pantalla_guard=_pantalla_guard,
+                    dedupe_key=dedupe_key,
                 )
             elif welcome_ready:
                 _deliver_pantalla_reply(
@@ -1577,6 +2066,8 @@ async def my_agent(ctx: JobContext):
                     "Tras ok: NO digas nada más en este turno — ni el saludo, ni "
                     "palabras como «silencio» o «esperando», ni ningún comentario "
                     "de cierre. Deja que [pantalla:intro] continúe sola.",
+                    pantalla_guard=_pantalla_guard,
+                    dedupe_key=dedupe_key,
                 )
             elif closing_instructions:
                 once_key = dedupe_key
@@ -1586,7 +2077,21 @@ async def my_agent(ctx: JobContext):
                     )
                     return
                 _mark_pantalla_narrated(once_key)
-                _deliver_pantalla_reply(agent_session, closing_instructions)
+                # photo_consent / delivered / thanks are real screen changes —
+                # interrupt immediately (nav grace). Only generating filler
+                # keeps the long grace so SETI facts aren't cut mid-sentence.
+                closing_grace = (
+                    _PANTALLA_INTERRUPT_GRACE_S
+                    if once_key == "closing:generating"
+                    else _PANTALLA_INTERRUPT_GRACE_NAV_S
+                )
+                _deliver_pantalla_reply(
+                    agent_session,
+                    closing_instructions,
+                    grace_s=closing_grace,
+                    pantalla_guard=_pantalla_guard,
+                    dedupe_key=dedupe_key,
+                )
                 if once_key == "closing:generating":
                     task = asyncio.create_task(
                         _generating_keepalive(agent_session, once_key)
@@ -1599,15 +2104,24 @@ async def my_agent(ctx: JobContext):
                 logger.info("[text_input] Skipping repeat analysis:complete pantalla")
                 return
             else:
+                analysis_instructions = _analysis_pantalla_instructions(dedupe_key)
                 if dedupe_key == "analysis:complete":
                     _mark_pantalla_narrated("analysis:complete")
                 _deliver_pantalla_reply(
                     agent_session,
-                    "Cambio de foco en pantalla. "
-                    "Llama get_session_state primero — ancla en step/phase actuales. "
-                    "Luego present_content solo si hace falta. "
-                    "PROHIBIDO repetir la misma locución si ya cubriste este phase. "
-                    "PROHIBIDO UI/pantalla/tarjeta meta.",
+                    analysis_instructions
+                    or (
+                        "Cambio de foco en pantalla. "
+                        "Llama get_session_state primero — ancla en step/phase actuales. "
+                        "Luego present_content solo si hace falta. "
+                        "PROHIBIDO repetir la misma locución si ya cubriste este phase. "
+                        "PROHIBIDO continuar hablando de la dimensión o pantalla anterior — "
+                        "el visitante ya cambió de vista. "
+                        "PROHIBIDO repetir el saludo de welcome. "
+                        "PROHIBIDO UI/pantalla/tarjeta meta."
+                    ),
+                    pantalla_guard=_pantalla_guard,
+                    dedupe_key=dedupe_key,
                 )
         else:
             transcript = event.text.strip()
@@ -1618,7 +2132,7 @@ async def my_agent(ctx: JobContext):
                         transcript,
                     )
                     return
-                agent_session.interrupt()
+                agent_session.interrupt(force=True)
                 agent_session.generate_reply(
                     user_input=event.text,
                     instructions=(
@@ -1627,10 +2141,10 @@ async def my_agent(ctx: JobContext):
                         "Si el visitante pide re-explicar una tarjeta — interpreta de forma AMPLIA: "
                         "cualquier señal de confusión, 'no entendí', 'no entendí bien', "
                         "'explícame de nuevo', 'repite', 'otra vez', 'de nuevo', 'me explicas', "
-                        "'no quedó claro', 'dimensiones', 'gestos', 'entregables', 'ítem N', "
+                        "'no quedó claro', 'dimensiones', 'cómo interactúo', 'entregables', 'ítem N', "
                         "'¿cuáles son?', '¿qué miden?', '¿cómo funciona?', '¿qué recibo?' — "
                         "llama navigate_journey(replay_intro_card, index=N) "
-                        "y narra esa tarjeta con más detalle (N=0 gestos, N=1 dimensiones, N=2 entregables). "
+                        "y narra esa tarjeta con más detalle (N=0 cómo interactuar, N=1 dimensiones, N=2 entregables). "
                         "Si hay duda sobre cuál tarjeta: usa N=1 si mencionó dimensiones, "
                         "N=0 si preguntó cómo interactuar, N=2 si preguntó qué recibe. "
                         "NUNCA respondas con 'no puedo' ni rechaces — SIEMPRE ejecuta replay_intro_card. "
@@ -1639,7 +2153,7 @@ async def my_agent(ctx: JobContext):
                     ),
                 )
                 return
-            agent_session.interrupt()
+            agent_session.interrupt(force=True)
             agent_session.generate_reply(
                 user_input=event.text,
                 instructions=(

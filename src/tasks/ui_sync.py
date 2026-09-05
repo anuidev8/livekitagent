@@ -179,10 +179,16 @@ async def speak_director_line(
     except Exception as exc:
         logger.warning("director_narration_arm failed segment=%s: %s", segment_id, exc)
 
+    # allow_interruptions=False is intentionally NOT passed here: Nova Sonic
+    # has its own server-side turn detection and silently ignores the flag
+    # (see the comment above on the VAD-settle sleep), so passing it only
+    # produces a spurious "allow_interruptions cannot be False when using
+    # VoiceAgent.generate_reply()" WARN with no behavior change. The actual
+    # "uninterruptible" effect for director lines comes from interrupt() +
+    # the VAD-settle sleep above, not from this flag.
     await generate_reply_safe(
         session,
         instructions=instructions,
-        allow_interruptions=False,
         wait_for_playout=wait_for_playout,
     )
     await wait_for_agent_idle(session)
