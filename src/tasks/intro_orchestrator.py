@@ -9,10 +9,14 @@ The agent delivers one brief spoken overview (~15-20 s) and then asks
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from livekit.agents import AgentSession
 
+from narration_barrier import get_session_narration_barrier
+from rpc_client import commit_guide_screen
+from tasks.speech import kill_agent_speech
 from tasks.ui_sync import speak_director_line
 
 logger = logging.getLogger("agent.intro_orchestrator")
@@ -30,6 +34,10 @@ def cancel_intro_tour() -> None:
     _run_token += 1
     if _active_task and not _active_task.done():
         _active_task.cancel()
+    # Invalidate in-flight intro narration ack so a late client silence
+    # cannot resume / unblock a cancelled tour.
+    with contextlib.suppress(Exception):
+        get_session_narration_barrier().invalidate()
 
 
 def schedule_intro_tour(session: AgentSession) -> bool:
@@ -52,13 +60,16 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
     logger.info("intro orchestrator start token=%s", token)
     try:
         # Button "Comenzar" often fires while welcome is still speaking.
-        # Waiting for idle let welcome audio continue into onboarding
-        # (2026-09-04_12-59-37). LiveKit pattern: interrupt() then speak.
-        try:
-            session.interrupt()
-        except Exception:
-            logger.debug("intro orchestrator interrupt raised", exc_info=True)
-        await asyncio.sleep(0.4)
+        # Hard-kill (interrupt force + clear_buffer + idle) so welcome audio
+        # and tools cannot bleed into onboarding.
+        await kill_agent_speech(session)
+
+        if not _token_valid(token):
+            return
+
+        # Reveal intro UI only after welcome buffers are cleared — lockstep
+        # with the new overview speech (hold+skeleton on the client).
+        await commit_guide_screen("intro:run")
 
         if not _token_valid(token):
             return
@@ -69,6 +80,11 @@ async def _run_intro_tour(session: AgentSession, token: int) -> None:
             session,
             segment_id="intro_tour",
             instructions=(
+                "INTRO «CÓMO FUNCIONA» — NO es welcome. "
+                "PROHIBIDO ABSOLUTO: Bienvenido/Bienvenida, saludar por nombre, cargo, "
+                "empresa, SETI rol, «Es un gusto saludarte», «presencia pública para "
+                "entender su posicionamiento», o repetir CUALQUIER frase de la "
+                "bienvenida anterior. "
                 "Entrega UNA sola locución natural de máximo 30 segundos, sin herramientas "
                 "ni pausas largas. PROHIBIDO abrir anunciando lo que vas a hacer «ahora te "
                 "explico», «vamos a ver cómo funciona», «te cuento el onboarding» y similares "

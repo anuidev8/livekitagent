@@ -80,3 +80,25 @@ async def rpc(
             await asyncio.sleep(0.45 * (attempt + 1))
 
     raise ToolError(f"No se pudo ejecutar {method}: {last_error}")
+
+
+async def commit_guide_screen(key: str | None) -> None:
+    """Reveal a held UI screen after kill — lockstep with new speech.
+
+    Non-fatal if the client has no pending hold (UI-first paths) or RPC fails.
+    """
+    if not key:
+        return
+    try:
+        await rpc(
+            "commit_guide_screen",
+            {"key": key},
+            timeout=2.0,
+            retries=0,
+        )
+        logger.info("commit_guide_screen ok key=%s", key)
+    except Exception:
+        logger.info(
+            "commit_guide_screen skipped/failed key=%s — continuing",
+            key,
+        )

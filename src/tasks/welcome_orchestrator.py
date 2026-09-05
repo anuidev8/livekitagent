@@ -10,7 +10,7 @@ from typing import Any
 from livekit.agents import AgentSession
 
 from rpc_client import rpc
-from tasks.speech import generate_reply_safe, wait_for_agent_idle
+from tasks.speech import generate_reply_safe, kill_agent_speech, wait_for_agent_idle
 
 logger = logging.getLogger("agent.welcome_orchestrator")
 
@@ -50,7 +50,7 @@ async def _navigate_to_intro() -> None:
 
 
 async def _run_welcome(session: AgentSession) -> None:
-    session.interrupt()
+    await kill_agent_speech(session)
     session.input.set_audio_enabled(False)
     spoke = False
     try:

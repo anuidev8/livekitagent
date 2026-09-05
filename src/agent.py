@@ -37,12 +37,13 @@ from nova_session_continuation import (
     install_nova_session_continuation_fix,
     install_nova_session_reconnected_event_fix,
 )
-from rpc_client import rpc, wait_for_kiosk_participant
+from rpc_client import commit_guide_screen, rpc, wait_for_kiosk_participant
 from tasks.intro_orchestrator import (
     cancel_intro_tour,
     intro_tour_running,
     schedule_intro_tour,
 )
+from tasks.speech import build_pantalla_chat_ctx, kill_agent_speech
 
 # The AWS plugin reads LK_SESSION_MAX_DURATION while its realtime module is
 # imported. Load local configuration and publish our renewal policy first;
@@ -478,23 +479,29 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        Tono analista senior, creíble para C-level. PROHIBIDO inventar fuentes.
        Cuando el agente recibe [pantalla:analysis:complete]:
     2) Complete: el globo se queda; las tarjetas de fuentes se actualizan
-       con el nombre de cada dimensión y su puntuación. Anuncia el standing
-       con calidez anclado en facts.uiStandingLine (el título en pantalla):
-       mismos puntos (rol, standingBlurb/banda, dimensión más fuerte), pero
-       MÁS AMABLE y conversacional — PROHIBIDO leer uiStandingLine literal.
+       con el nombre de cada dimensión y su puntuación. ANTES de hablar,
+       llama present_content(result_dimension, dimension_id=facts.
+       strongestDimension.id) para resaltar en pantalla esa tarjeta — lo que
+       ves resaltado debe coincidir siempre con la dimensión de la que hablas.
+       Luego anuncia el standing con calidez anclado en facts.uiStandingLine
+       (el título en pantalla): mismos puntos (rol, standingBlurb/banda,
+       dimensión más fuerte), pero MÁS AMABLE y conversacional — PROHIBIDO
+       leer uiStandingLine literal.
        En el mismo flujo (3-5 oraciones): UNA fortaleza concreta de
        facts.strengths o facts.coverLines y UNA brecha de facts.opportunities
        o facts.weakestDimension — solo datos del informe, tono consultor C-level.
-       PROHIBIDO recitar solo «LÍDER · TOP 8%». Invita a abrir el detalle
-       de una dimensión (no hay vista resumen aparte).
+       PROHIBIDO recitar solo «LÍDER · TOP 8%». Cierra preguntando si quiere
+       ver el detalle de la tarjeta resaltada o prefiere otra dimensión —
+       PARA y ESPERA su respuesta antes de abrir nada.
        availableActions aquí: reveal_results, open_detail, back, cancel —
        PROHIBIDO navigate_journey(advance).
-       Si el visitante pide ver el detalle de una dimensión (o «detalle»,
-       «fortalezas», «oportunidades», «plan»): navigate_journey(open_detail,
-       dimension_id=serp|ssi|arquitectura|influencia|higiene) O
-       present_content(detail_dimension, dimension_id=…).
-       PROHIBIDO present_content(result_dimension) en complete — solo resalta
-       y requiere phase=results; no abre el detalle.
+       Si el visitante confirma la dimensión resaltada, nombra otra, o pide
+       «detalle», «fortalezas», «oportunidades», «plan»: navigate_journey(
+       open_detail, dimension_id=serp|ssi|arquitectura|influencia|higiene) —
+       el tool call es lo que abre el detalle; tu voz sola no lo abre.
+       Si nombra una dimensión distinta a la resaltada mientras hablas,
+       resáltala primero con present_content(result_dimension, dimension_id=…)
+       y sigue narrando desde ahí — ya no está prohibido llamarlo en complete.
     3) Cuando llega [pantalla:analysis:results]: mismo globo con
        tarjeta activa resaltada. El visitante navega por TOQUE o por voz —
        NO ciclar todas las dimensiones solo.
@@ -1194,7 +1201,11 @@ def _pantalla_dedupe_key(text: str) -> str:
         return f"detail:revisit:{dim_match.group(1)}" if dim_match else "detail:revisit"
     if "detail:continuous" in text or "DETAIL_CONTINUOUS" in text:
         dim_match = re.search(r"DIM_ID=(\S+)", text)
-        return f"detail:continuous:{dim_match.group(1)}" if dim_match else "detail:continuous"
+        return (
+            f"detail:continuous:{dim_match.group(1)}"
+            if dim_match
+            else "detail:continuous"
+        )
     match = re.search(r"\[pantalla:([^\]]+)\]", text)
     if match:
         return match.group(1).split("]")[0].strip()
@@ -1210,9 +1221,11 @@ def _analysis_pantalla_instructions(dedupe_key: str) -> str | None:
     if dedupe_key == "analysis:scanning":
         return (
             "ANALYSIS SCAN — get_session_state PRIMERO. "
-            "El visitante YA pasó la bienvenida (puede haber tocado botones rápido). "
+            "Estás en la pantalla de ANÁLISIS / ESCANEANDO (iconos de fuentes). "
             "PROHIBIDO ABSOLUTO: repetir saludo, nombre+rol de welcome, «¿Vemos cómo "
-            "funciona?», o cualquier frase de bienvenida anterior. "
+            "funciona?», «¿Empezamos el análisis?», o cualquier frase de bienvenida. "
+            "PROHIBIDO ABSOLUTO: manilla, lector NFC, identificación, acercarse al "
+            "espejo/lector, attract, o pedir que se identifiquen — ESO YA PASÓ. "
             "Narra SOLO el escaneo en vivo: fuentes que se revisan (facts.sourceGroups / "
             "facts.narrationAnchors / facts.searchFindings) — LinkedIn, prensa, redes, "
             "sitios. Tono analista senior. PROHIBIDO lista numerada. "
@@ -1547,33 +1560,61 @@ _PANTALLA_INTERRUPT_GRACE_NAV_S = 0.0
 _pending_pantalla_replies: set[asyncio.Task[None]] = set()
 
 
+def _cancel_pending_pantalla_replies() -> int:
+    """Cancel in-flight wait-then-speak tasks from earlier pantalla cues.
+
+    Rapid taps used to leave multiple independent tasks alive; each eventually
+    called generate_reply(), so old-screen welcome/detail speech and tools
+    finished after the UI had already moved.
+    """
+    cancelled = 0
+    for task in list(_pending_pantalla_replies):
+        if not task.done():
+            task.cancel()
+            cancelled += 1
+        _pending_pantalla_replies.discard(task)
+    return cancelled
+
+
+async def _commit_guide_screen(dedupe_key: str | None) -> None:
+    """Reveal the held UI only after kill — lockstep with new speech."""
+    await commit_guide_screen(dedupe_key)
+
+
 def _deliver_pantalla_reply(
     agent_session: AgentSession,
     instructions: str,
     grace_s: float = _PANTALLA_INTERRUPT_GRACE_NAV_S,
-    pantalla_guard: "_PantallaGuard | None" = None,
+    pantalla_guard: _PantallaGuard | None = None,
     dedupe_key: str | None = None,
 ) -> None:
-    """Speak `instructions` now if the agent is idle, or once the in-flight
-    utterance finishes — bounded wait, then force-interrupt if it runs long.
+    """Speak `instructions` only after a real kill of prior speech/tools.
 
-    Defaults to the short, touch-responsive grace period. Callers reading a
-    filler while something loads (generating keep-alive, closing) pass
-    grace_s=_PANTALLA_INTERRUPT_GRACE_S explicitly instead.
+    Defaults to the short, touch-responsive grace period (interrupt right
+    away). Callers reading a filler while something loads (generating
+    keep-alive, closing) pass grace_s=_PANTALLA_INTERRUPT_GRACE_S explicitly
+    to let it finish naturally first.
 
-    Freshness, not another timeout: rapid consecutive navigation (e.g. a
-    single tap that fires both an "analysis_results" and a "detail:continuous"
-    cue ~1s apart, or detail -> back -> another detail within the grace
-    window) used to spawn multiple independent wait-then-speak tasks that
-    each eventually called generate_reply(), so a superseded reply about a
-    screen the visitor already left could still get spoken after the newer
-    one (2026-09-04 logs: agent kept narrating "Higiene" facts after the
-    visitor had already opened SSI). Pass pantalla_guard + dedupe_key so
-    this checks _PantallaGuard.last_key — updated by every new cue — right
-    before speaking, and drops itself if a newer cue has since superseded
-    it. No cancellation bookkeeping and no extra magic number: this works
-    correctly no matter how long the wait ends up being.
+    Hard kill path: cancel superseded pending reply tasks, then
+    ``kill_agent_speech`` = await ``interrupt(force=True)`` +
+    ``output.audio.clear_buffer()`` + ``wait_for_idle`` + Nova VAD settle.
+    Soft interrupt alone left residual audio and prior-turn tools running on
+    the new screen; frontend mute is not the kill — this is.
+
+    After kill, ``commit_guide_screen`` reveals the pending UI, then
+    ``generate_reply`` starts — view + speech together (not UI-first).
+
+    Freshness: pass pantalla_guard + dedupe_key so this checks
+    _PantallaGuard.last_key right before speaking and drops itself if a newer
+    cue has since superseded it.
     """
+    superseded = _cancel_pending_pantalla_replies()
+    if superseded:
+        logger.info(
+            "[text_input] Cancelled %d superseded pantalla reply task(s) before %s",
+            superseded,
+            dedupe_key or "?",
+        )
 
     def _stale() -> bool:
         return (
@@ -1582,172 +1623,59 @@ def _deliver_pantalla_reply(
             and pantalla_guard.last_key != dedupe_key
         )
 
-    current = agent_session.current_speech
-    if current is None or current.done():
+    async def _run() -> None:
+        if grace_s > 0:
+            current = agent_session.current_speech
+            if current is not None and not current.done():
+                # Poll in short slices so a captured `current` reference that
+                # goes stale mid-wait doesn't eat the whole grace as dead air
+                # (Nova autonomous turns can leave wait_for_playout hanging).
+                poll_s = min(0.5, grace_s)
+                remaining = grace_s
+                finished_naturally = False
+                while remaining > 0:
+                    step = min(poll_s, remaining)
+                    try:
+                        await asyncio.wait_for(current.wait_for_playout(), timeout=step)
+                        finished_naturally = True
+                        break
+                    except asyncio.TimeoutError:
+                        remaining -= step
+                        if agent_session.current_speech is not current:
+                            break
+
+                if finished_naturally and _stale():
+                    logger.info(
+                        "[text_input] Dropping superseded pantalla reply "
+                        "(finished naturally, newer cue arrived): %s",
+                        dedupe_key,
+                    )
+                    return
+                if not finished_naturally:
+                    logger.info(
+                        "[text_input] Grace period elapsed (%.1fs) — "
+                        "killing speech for new screen content: %s",
+                        grace_s,
+                        dedupe_key,
+                    )
+
+        await kill_agent_speech(agent_session)
+
         if _stale():
             logger.info(
-                "[text_input] Dropping superseded pantalla reply (idle path): %s",
+                "[text_input] Dropping superseded pantalla reply (after kill): %s",
                 dedupe_key,
             )
             return
-        # Button-nav can fire a new cue while the previous generate_reply has
-        # started but current_speech is not registered yet — interrupt any
-        # leftover so we don't stack welcome + scanning (2026-09-04 logs).
-        # force=True: without it, AgentSession.interrupt() raises (silently,
-        # if not logged) on a speech handle with allow_interruptions=False
-        # instead of actually stopping it — see the force=True note on the
-        # busy-path interrupt below for the regression this caused.
-        try:
-            agent_session.interrupt(force=True)
-        except Exception:
-            logger.warning(
-                "[text_input] agent_session.interrupt(force=True) failed "
-                "(idle path) for %s",
-                dedupe_key,
-                exc_info=True,
-            )
-        if _stale():
-            logger.info(
-                "[text_input] Dropping superseded pantalla reply "
-                "(idle path, after interrupt): %s",
-                dedupe_key,
-            )
-            return
-        agent_session.generate_reply(instructions=instructions)
-        return
 
-    # Touch nav (grace_s == 0): interrupt NOW — do not let old-screen audio
-    # continue while the visitor already moved (welcome→intro, detail→back).
-    if grace_s <= 0:
-        if _stale():
-            logger.info(
-                "[text_input] Dropping superseded pantalla reply "
-                "(immediate interrupt path): %s",
-                dedupe_key,
-            )
-            return
-        logger.info(
-            "[text_input] Immediate interrupt for button/UI navigation: %s",
-            dedupe_key,
-        )
-        # force=True on BOTH calls: SpeechHandle.interrupt()/AgentSession.interrupt()
-        # raise RuntimeError instead of stopping playback when the current speech
-        # handle was created with allow_interruptions=False — the SDK docs say
-        # such a handle "keeps playing... unless force is set". Without force=True
-        # here, that raise was caught and silently discarded (bare except: pass,
-        # no log), so the log line above claimed an interrupt happened while the
-        # old narration in fact played on to natural completion — touch navigation
-        # only "sometimes" cut off old speech, with zero trace of the failure
-        # (2026-09-04: visitor tapped a dimension detail card and the previous
-        # dimension's narration played all the way through instead of stopping).
-        # Touch/button navigation must always win over in-flight narration, so
-        # forcing here matches that intent instead of only working when the
-        # current handle happened to allow it.
-        try:
-            current.interrupt(force=True)
-        except Exception:
-            logger.warning(
-                "[text_input] current.interrupt(force=True) failed for %s",
-                dedupe_key,
-                exc_info=True,
-            )
-            try:
-                agent_session.interrupt(force=True)
-            except Exception:
-                logger.warning(
-                    "[text_input] agent_session.interrupt(force=True) also "
-                    "failed for %s",
-                    dedupe_key,
-                    exc_info=True,
-                )
+        await _commit_guide_screen(dedupe_key)
+        reply_kwargs: dict = {"instructions": instructions}
+        chat_ctx = build_pantalla_chat_ctx(agent_session)
+        if chat_ctx is not None:
+            reply_kwargs["chat_ctx"] = chat_ctx
+        agent_session.generate_reply(**reply_kwargs)
 
-        async def _speak_after_interrupt() -> None:
-            # Brief settle so Nova Sonic server-side VAD accepts the new reply.
-            await asyncio.sleep(0.35)
-            if _stale():
-                logger.info(
-                    "[text_input] Dropping superseded pantalla reply "
-                    "(after interrupt settle): %s",
-                    dedupe_key,
-                )
-                return
-            agent_session.generate_reply(instructions=instructions)
-
-        task = asyncio.create_task(_speak_after_interrupt())
-        _pending_pantalla_replies.add(task)
-        task.add_done_callback(_pending_pantalla_replies.discard)
-        return
-
-    async def _wait_then_speak() -> None:
-        # Poll in short slices instead of one blind wait_for(..., timeout=
-        # grace_s) so a captured `current` reference that goes STALE mid-wait
-        # doesn't eat the whole grace period as dead air. Regression
-        # (2026-09-04 14:04-14:09 logs): the visitor left a dimension detail
-        # view, took their closing photo, and the closing:generating cue
-        # captured session.current_speech pointing at the OLD detail_section
-        # SpeechHandle. That handle's own audio had already finished, but
-        # its wait_for_playout() never resolved (looks like a framework-side
-        # race for autonomous Nova turns not fully reflected in
-        # current_speech) — the session had already moved on to a newer
-        # handle (the photo-taking exchange) by the time this cue arrived.
-        # The old single 12s wait_for() had no way to notice that and sat
-        # silent for the full "In-flight speech exceeded 12.0s" grace before
-        # the guide said anything about closing:generating. Checking
-        # `agent_session.current_speech is not current` between slices lets
-        # this bail out as soon as the session itself has moved past the
-        # handle we're protecting — nothing left to wait for — without
-        # shortening the grace for the legitimate case (a filler genuinely
-        # still speaking, where current_speech keeps pointing at `current`
-        # the whole time).
-        poll_s = min(0.5, grace_s)
-        remaining = grace_s
-        finished_naturally = False
-        superseded_by_session = False
-        while remaining > 0:
-            step = min(poll_s, remaining)
-            try:
-                await asyncio.wait_for(current.wait_for_playout(), timeout=step)
-                finished_naturally = True
-                break
-            except asyncio.TimeoutError:
-                remaining -= step
-                if agent_session.current_speech is not current:
-                    superseded_by_session = True
-                    break
-
-        if not finished_naturally:
-            if _stale():
-                logger.info(
-                    "[text_input] Dropping superseded pantalla reply "
-                    "(grace expired, newer cue arrived): %s",
-                    dedupe_key,
-                )
-                return
-            if superseded_by_session:
-                logger.info(
-                    "[text_input] In-flight speech handle superseded by the "
-                    "session after %.1fs — skipping remaining grace for new "
-                    "screen content",
-                    grace_s - remaining,
-                )
-            else:
-                logger.info(
-                    "[text_input] In-flight speech exceeded %.1fs — interrupting "
-                    "for new screen content",
-                    grace_s,
-                )
-            current.interrupt(force=True)
-        else:
-            if _stale():
-                logger.info(
-                    "[text_input] Dropping superseded pantalla reply "
-                    "(finished naturally, newer cue arrived): %s",
-                    dedupe_key,
-                )
-                return
-        agent_session.generate_reply(instructions=instructions)
-
-    task = asyncio.create_task(_wait_then_speak())
+    task = asyncio.create_task(_run())
     _pending_pantalla_replies.add(task)
     task.add_done_callback(_pending_pantalla_replies.discard)
 
@@ -2030,7 +1958,8 @@ async def my_agent(ctx: JobContext):
                     "relevante de facts.evidence, la brecha más importante de facts.gaps, "
                     "y UNA táctica concreta de facts.tactics — parafraseado en prosa natural "
                     "ligada a facts.role en facts.company, explicando brevemente el POR QUÉ."
-                    + revisit_note + " "
+                    + revisit_note
+                    + " "
                     "UNA sola respuesta SIN silencios ni pausas para esas 3-4 frases. "
                     "PROHIBIDO present_content extra ni get_session_state OTRA VEZ a mitad de "
                     "la síntesis (una sola llamada a get_session_state al inicio es obligatoria; "
@@ -2107,6 +2036,13 @@ async def my_agent(ctx: JobContext):
                 analysis_instructions = _analysis_pantalla_instructions(dedupe_key)
                 if dedupe_key == "analysis:complete":
                     _mark_pantalla_narrated("analysis:complete")
+                # Let scanning narration finish before complete (loading UI
+                # should track voice; nav grace 0 was cutting mid-LinkedIn).
+                analysis_grace = (
+                    _PANTALLA_INTERRUPT_GRACE_S
+                    if dedupe_key == "analysis:complete"
+                    else _PANTALLA_INTERRUPT_GRACE_NAV_S
+                )
                 _deliver_pantalla_reply(
                     agent_session,
                     analysis_instructions
@@ -2120,6 +2056,7 @@ async def my_agent(ctx: JobContext):
                         "PROHIBIDO repetir el saludo de welcome. "
                         "PROHIBIDO UI/pantalla/tarjeta meta."
                     ),
+                    grace_s=analysis_grace,
                     pantalla_guard=_pantalla_guard,
                     dedupe_key=dedupe_key,
                 )

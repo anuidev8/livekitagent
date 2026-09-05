@@ -20,8 +20,19 @@ class NarrationBarrier:
         self._token += 1
         self._segment_id = segment_id
         self._event = asyncio.Event()
-        logger.debug("narration barrier armed segment=%s token=%s", segment_id, self._token)
+        logger.debug(
+            "narration barrier armed segment=%s token=%s", segment_id, self._token
+        )
         return self._token
+
+    def invalidate(self) -> None:
+        """Drop any armed wait so cancelled tours cannot unblock on late ack."""
+        self._token += 1
+        self._segment_id = ""
+        if self._event is not None and not self._event.is_set():
+            self._event.set()
+        self._event = None
+        logger.debug("narration barrier invalidated token=%s", self._token)
 
     def ack(self, segment_id: str, token: int) -> bool:
         if token != self._token or segment_id != self._segment_id:
@@ -38,8 +49,14 @@ class NarrationBarrier:
             logger.info("narration barrier ack segment=%s token=%s", segment_id, token)
         return True
 
-    async def wait(self, segment_id: str, token: int, *, timeout: float = 120.0) -> bool:
-        if token != self._token or segment_id != self._segment_id or self._event is None:
+    async def wait(
+        self, segment_id: str, token: int, *, timeout: float = 120.0
+    ) -> bool:
+        if (
+            token != self._token
+            or segment_id != self._segment_id
+            or self._event is None
+        ):
             return False
         try:
             await asyncio.wait_for(self._event.wait(), timeout=timeout)

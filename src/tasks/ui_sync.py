@@ -19,9 +19,14 @@ from typing import Any, Literal
 
 from livekit.agents import AgentSession
 
-from rpc_client import rpc
 from narration_barrier import get_session_narration_barrier
-from tasks.speech import generate_reply_safe, wait_for_agent_idle
+from rpc_client import rpc
+from tasks.speech import (
+    build_pantalla_chat_ctx,
+    generate_reply_safe,
+    kill_agent_speech,
+    wait_for_agent_idle,
+)
 
 logger = logging.getLogger("agent.ui_sync")
 
@@ -158,19 +163,14 @@ async def speak_director_line(
     """Interrupt, speak one director line, wait for kiosk room-audio ack.
 
     Set skip_interrupt=True when the caller has already interrupted and no new
-    LLM speech could have started since then — avoids the redundant 1.2s VAD
-    settle and makes back-to-back director lines start immediately.
+    LLM speech could have started since then — avoids a redundant settle sleep
+    and makes back-to-back director lines start immediately.
     """
+    # Never pass tool_choice on Nova — Bedrock rejects inference-config updates.
+    # Hard-kill prior speech/tools before a director line so touch-nav cannot
+    # leave residual audio or mid-flight tools on the next screen.
     if not skip_interrupt:
-        session.interrupt()
-        await wait_for_agent_idle(session)
-
-        # Nova Sonic uses server-side turn detection and ignores allow_interruptions=False.
-        # After interrupt() + wait_for_idle(), the server-side VAD still needs time to
-        # settle before a new generate_reply fires — otherwise the first audio chunk gets
-        # clipped by the server's own reset event.
-        # 1.2s puts us past Nova's VAD reset window (~50–600ms observed in production).
-        await asyncio.sleep(1.2)
+        await kill_agent_speech(session)
 
     barrier = get_session_narration_barrier()
     token = barrier.arm(segment_id)
@@ -179,17 +179,14 @@ async def speak_director_line(
     except Exception as exc:
         logger.warning("director_narration_arm failed segment=%s: %s", segment_id, exc)
 
-    # allow_interruptions=False is intentionally NOT passed here: Nova Sonic
-    # has its own server-side turn detection and silently ignores the flag
-    # (see the comment above on the VAD-settle sleep), so passing it only
-    # produces a spurious "allow_interruptions cannot be False when using
-    # VoiceAgent.generate_reply()" WARN with no behavior change. The actual
-    # "uninterruptible" effect for director lines comes from interrupt() +
-    # the VAD-settle sleep above, not from this flag.
+    # allow_interruptions is intentionally omitted: Nova Sonic has its own
+    # server-side turn detection and silently ignores the flag (WARN only).
+    # Fresh chat_ctx drops welcome history so intro does not re-greet.
     await generate_reply_safe(
         session,
         instructions=instructions,
         wait_for_playout=wait_for_playout,
+        chat_ctx=build_pantalla_chat_ctx(session),
     )
     await wait_for_agent_idle(session)
 

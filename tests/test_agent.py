@@ -1,11 +1,9 @@
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from livekit.agents import inference, llm
 
-import agent as agent_module
 from agent import (
     _GENERATING_SETI_FACTS,
     _PANTALLA_INTERRUPT_GRACE_NAV_S,
@@ -119,7 +117,8 @@ def test_nova_agent_keeps_stable_tools_without_handoffs() -> None:
     assert "resumen general" in nova_lower
 
 
-def test_analysis_task_is_focused() -> None:
+@pytest.mark.asyncio
+async def test_analysis_task_is_focused() -> None:
     task = AnalysisTask()
     assert "result_dimension" in task.instructions
     assert "scanning" in task.instructions
@@ -130,7 +129,8 @@ def test_analysis_task_is_focused() -> None:
     assert "return_to_supervisor" in tool_names
 
 
-def test_attract_task_is_focused() -> None:
+@pytest.mark.asyncio
+async def test_attract_task_is_focused() -> None:
     task = AttractTask()
     assert "Gestos" in task.instructions or "interaction-card" in task.instructions
     assert "start_experience" in task.instructions
@@ -319,228 +319,176 @@ async def test_unused_inference_judge_smoke() -> None:
     assert llm_inst is not None
 
 
-def test_deliver_pantalla_reply_speaks_immediately_when_idle() -> None:
-    """No in-flight speech (None, or already done) — speak right away, no task."""
-    session = MagicMock()
-    session.current_speech = None
-    _deliver_pantalla_reply(session, "hola")
-    session.generate_reply.assert_called_once_with(instructions="hola")
-    assert not _pending_pantalla_replies
+class _FakeSpeechHandle:
+    def __init__(self, *, done: bool = True) -> None:
+        self._done = done
+        self.interrupt = MagicMock()
+        self.wait_for_playout = AsyncMock()
 
-    session2 = MagicMock()
-    done_handle = MagicMock()
-    done_handle.done.return_value = True
-    session2.current_speech = done_handle
-    _deliver_pantalla_reply(session2, "hola de nuevo")
-    session2.generate_reply.assert_called_once_with(instructions="hola de nuevo")
-    assert not _pending_pantalla_replies
+    def done(self) -> bool:
+        return self._done
+
+
+def _resolved_future() -> asyncio.Future:
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    fut.set_result(None)
+    return fut
+
+
+def _mock_session(*, current_speech=None) -> MagicMock:
+    session = MagicMock()
+    session.current_speech = current_speech
+    session.interrupt = MagicMock(return_value=_resolved_future())
+    session.output.audio = MagicMock()
+    session.wait_for_idle = AsyncMock()
+    session.current_agent = MagicMock()
+    session.current_agent.chat_ctx = MagicMock()
+    session.current_agent.chat_ctx.copy.return_value.truncate.return_value = MagicMock(
+        name="fresh_ctx"
+    )
+    return session
 
 
 @pytest.mark.asyncio
-async def test_deliver_pantalla_reply_waits_for_current_speech_then_speaks() -> None:
-    """Filler/grace > 0: defer to a background task, don't cut mid-utterance
-    if it finishes within the grace period (used by generating keep-alive)."""
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
+async def test_deliver_pantalla_reply_speaks_immediately_when_idle() -> None:
+    session = _mock_session(current_speech=None)
 
-    async def _finishes_quickly() -> None:
-        return None
+    with patch("agent._commit_guide_screen", new=AsyncMock()) as commit:
+        _deliver_pantalla_reply(session, "hola", dedupe_key="analysis:results")
+        await asyncio.sleep(0.4)
 
-    handle.wait_for_playout = _finishes_quickly
-    session.current_speech = handle
-
-    _deliver_pantalla_reply(session, "nuevo contenido", grace_s=2.0)
-
-    # Deferred, not fired synchronously — the whole point is not to chop off
-    # the in-flight utterance.
-    session.generate_reply.assert_not_called()
-    assert len(_pending_pantalla_replies) == 1
-
-    await asyncio.gather(*_pending_pantalla_replies)
-
-    handle.interrupt.assert_not_called()
-    session.generate_reply.assert_called_once_with(instructions="nuevo contenido")
+    session.interrupt.assert_called_once_with(force=True)
+    session.output.audio.clear_buffer.assert_called()
+    session.wait_for_idle.assert_awaited()
+    commit.assert_awaited_once_with("analysis:results")
+    session.generate_reply.assert_called_once()
+    assert session.generate_reply.call_args.kwargs["instructions"] == "hola"
+    assert "chat_ctx" in session.generate_reply.call_args.kwargs
 
 
 @pytest.mark.asyncio
-async def test_deliver_pantalla_reply_interrupts_immediately_on_button_nav() -> None:
-    """Default nav grace is 0 — button tap must cut old speech now
-    (2026-09-04_12-59-37: welcome kept talking after Comenzar)."""
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
-    session.current_speech = handle
+async def test_deliver_pantalla_reply_uses_fresh_chat_ctx() -> None:
+    session = _mock_session(current_speech=None)
+    fresh = MagicMock(name="fresh_ctx")
 
-    with patch("agent.asyncio.sleep", new=AsyncMock()):
-        _deliver_pantalla_reply(session, "contenido nueva pantalla")
-        assert len(_pending_pantalla_replies) == 1
-        await asyncio.gather(*_pending_pantalla_replies)
+    with (
+        patch("agent._commit_guide_screen", new=AsyncMock()),
+        patch("agent.build_pantalla_chat_ctx", return_value=fresh),
+    ):
+        _deliver_pantalla_reply(
+            session, "ANALYSIS SCAN only", dedupe_key="analysis:scanning"
+        )
+        await asyncio.sleep(0.4)
 
-    handle.interrupt.assert_called_once()
     session.generate_reply.assert_called_once_with(
-        instructions="contenido nueva pantalla"
+        instructions="ANALYSIS SCAN only",
+        chat_ctx=fresh,
     )
 
 
 @pytest.mark.asyncio
-async def test_deliver_pantalla_reply_force_interrupts_after_grace_period() -> None:
-    """Speech that runs long — bounded wait, then force-interrupt, then speak.
-    This is the safety net so a stuck/long utterance can't indefinitely delay
-    new screen content, mirroring the on_enter timeout fix."""
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
+async def test_deliver_pantalla_reply_commits_ui_before_speech() -> None:
+    session = _mock_session(current_speech=None)
+    order: list[str] = []
 
-    async def _never_finishes() -> None:
-        await asyncio.sleep(10)
+    async def _commit(key: str | None) -> None:
+        order.append(f"commit:{key}")
 
-    handle.wait_for_playout = _never_finishes
-    session.current_speech = handle
+    def _gen(**kwargs):
+        order.append("speak")
+        return MagicMock()
 
-    _deliver_pantalla_reply(session, "contenido urgente", grace_s=0.05)
-    assert len(_pending_pantalla_replies) == 1
-    await asyncio.gather(*_pending_pantalla_replies)
+    session.generate_reply = MagicMock(side_effect=_gen)
 
-    handle.interrupt.assert_called_once()
-    session.generate_reply.assert_called_once_with(instructions="contenido urgente")
+    with patch("agent._commit_guide_screen", new=AsyncMock(side_effect=_commit)):
+        _deliver_pantalla_reply(
+            session, "dim higiene", dedupe_key="detail:continuous:higiene"
+        )
+        await asyncio.sleep(0.4)
 
-
-@pytest.mark.asyncio
-async def test_deliver_pantalla_reply_skips_wait_when_session_moves_on() -> None:
-    """Regression (2026-09-04 14:04-14:09 logs): the visitor left a dimension
-    detail view and took their closing photo; the closing:generating cue
-    then captured session.current_speech pointing at the OLD detail_section
-    SpeechHandle. That handle's wait_for_playout() never resolved (its own
-    audio had already finished, but the framework never marked it done —
-    looks like autonomous Nova turns don't always update current_speech),
-    while the session had already moved on to a newer handle in the
-    meantime. The old single `wait_for(current.wait_for_playout(),
-    timeout=12.0)` had no way to notice that and sat completely silent for
-    the full 12s grace ("In-flight speech exceeded 12.0s") before the guide
-    said anything about closing:generating. The fix polls in short slices
-    and bails as soon as agent_session.current_speech no longer points at
-    the captured handle, instead of trusting a reference that can go stale.
-    """
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
-
-    async def _never_finishes() -> None:
-        await asyncio.sleep(30)
-
-    handle.wait_for_playout = _never_finishes
-    session.current_speech = handle
-
-    async def _session_moves_on_after_a_bit() -> None:
-        await asyncio.sleep(0.1)
-        session.current_speech = MagicMock()  # a newer, unrelated handle
-
-    reassign_task = asyncio.create_task(_session_moves_on_after_a_bit())
-
-    start = time.monotonic()
-    _deliver_pantalla_reply(session, "contenido nuevo", grace_s=12.0)
-    assert len(_pending_pantalla_replies) == 1
-    await asyncio.gather(*_pending_pantalla_replies)
-    elapsed = time.monotonic() - start
-    await reassign_task
-
-    handle.interrupt.assert_called_once()
-    session.generate_reply.assert_called_once_with(instructions="contenido nuevo")
-    # Must bail out well before the full 12s grace once the session has
-    # moved on — a few poll slices, not the whole timeout.
-    assert elapsed < 2.0
+    assert order == ["commit:detail:continuous:higiene", "speak"]
 
 
 @pytest.mark.asyncio
-async def test_deliver_pantalla_reply_drops_stale_reply_after_grace_timeout() -> None:
-    """Regression (2026-09-04 logs): a single tap fired two pantalla cues ~1s
-    apart (analysis_results, then detail:continuous). Each spawned its own
-    wait-then-speak task; the first one's grace period expired AFTER the
-    second cue had already updated the guard, but it still spoke stale
-    "Higiene" content on top of the new dimension. With a pantalla_guard +
-    dedupe_key passed, the stale task must recognize it's been superseded
-    and drop itself instead of interrupting or speaking — no new timeout
-    tuning, just a freshness check against the guard's last_key."""
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
-
-    async def _never_finishes() -> None:
-        await asyncio.sleep(10)
-
-    handle.wait_for_playout = _never_finishes
-    session.current_speech = handle
-
+async def test_deliver_pantalla_reply_drops_stale_reply_when_idle() -> None:
+    session = _mock_session(current_speech=None)
     guard = _PantallaGuard()
-    guard.is_duplicate("analysis:results")  # sets last_key to the OLD cue
+    guard.is_duplicate("newer")
 
-    _deliver_pantalla_reply(
-        session,
-        "contenido viejo (higiene)",
-        grace_s=0.05,
-        pantalla_guard=guard,
-        dedupe_key="analysis:results",
-    )
-    assert len(_pending_pantalla_replies) == 1
-
-    # A newer cue arrives and updates the guard before the old task's grace
-    # period expires — simulating the second pantalla cue from the same tap.
-    guard.is_duplicate("detail:continuous")
-
-    await asyncio.gather(*_pending_pantalla_replies)
-
-    handle.interrupt.assert_not_called()
-    session.generate_reply.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_deliver_pantalla_reply_drops_stale_reply_when_speech_finishes_naturally() -> None:
-    """Same supersession guard, but on the non-timeout path: even if the old
-    speech finishes playing out on its own before the grace period, a
-    superseded reply must not speak stale content over the new screen."""
-    session = MagicMock()
-    handle = MagicMock()
-    handle.done.return_value = False
-
-    async def _finishes_quickly() -> None:
-        return None
-
-    handle.wait_for_playout = _finishes_quickly
-    session.current_speech = handle
-
-    guard = _PantallaGuard()
-    guard.is_duplicate("analysis:results")
-
-    _deliver_pantalla_reply(
-        session,
-        "contenido viejo (higiene)",
-        pantalla_guard=guard,
-        dedupe_key="analysis:results",
-    )
-    guard.is_duplicate("detail:continuous")
-
-    await asyncio.gather(*_pending_pantalla_replies)
+    with patch("agent._commit_guide_screen", new=AsyncMock()) as commit:
+        _deliver_pantalla_reply(
+            session, "stale", pantalla_guard=guard, dedupe_key="older"
+        )
+        await asyncio.sleep(0.4)
 
     session.generate_reply.assert_not_called()
+    commit.assert_not_awaited()
 
 
-def test_deliver_pantalla_reply_speaks_when_key_still_current() -> None:
-    """Sanity check: the freshness guard must not block the normal case —
-    a fresh, non-superseded reply still speaks immediately when idle."""
-    session = MagicMock()
-    session.current_speech = None
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_nav_grace_kills_current_speech() -> None:
+    current = _FakeSpeechHandle(done=False)
+    session = _mock_session(current_speech=current)
 
-    guard = _PantallaGuard()
-    guard.is_duplicate("welcome:ready")
+    with patch("agent._commit_guide_screen", new=AsyncMock()):
+        _deliver_pantalla_reply(session, "nueva pantalla", grace_s=0.0)
+        await asyncio.sleep(0.4)
 
-    _deliver_pantalla_reply(
-        session,
-        "hola",
-        pantalla_guard=guard,
-        dedupe_key="welcome:ready",
-    )
-    session.generate_reply.assert_called_once_with(instructions="hola")
+    session.interrupt.assert_called_once_with(force=True)
+    session.output.audio.clear_buffer.assert_called()
+    current.interrupt.assert_not_called()
+    session.generate_reply.assert_called_once()
+    assert session.generate_reply.call_args.kwargs["instructions"] == "nueva pantalla"
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_cancels_superseded_pending_tasks() -> None:
+
+    session = _mock_session(current_speech=None)
+    blocker = asyncio.Event()
+
+    async def _never() -> None:
+        await blocker.wait()
+
+    stale = asyncio.create_task(_never())
+    _pending_pantalla_replies.add(stale)
+
+    with patch("agent._commit_guide_screen", new=AsyncMock()):
+        _deliver_pantalla_reply(session, "fresh", dedupe_key="analysis:results")
+        await asyncio.sleep(0.4)
+
+    assert stale.cancelled()
+    assert stale not in _pending_pantalla_replies
+    session.generate_reply.assert_called_once()
+    assert session.generate_reply.call_args.kwargs["instructions"] == "fresh"
+    blocker.set()
+
+
+@pytest.mark.asyncio
+async def test_deliver_pantalla_reply_waits_out_grace_then_speaks() -> None:
+    current = _FakeSpeechHandle(done=False)
+    current.wait_for_playout = AsyncMock(return_value=None)
+    session = _mock_session(current_speech=current)
+
+    with patch("agent._commit_guide_screen", new=AsyncMock()):
+        _deliver_pantalla_reply(session, "filler", grace_s=1.0)
+        await asyncio.sleep(0.4)
+
+    session.interrupt.assert_called_once_with(force=True)
+    session.generate_reply.assert_called_once()
+    assert session.generate_reply.call_args.kwargs["instructions"] == "filler"
+
+
+@pytest.mark.asyncio
+async def test_commit_guide_screen_calls_rpc() -> None:
+    with patch("rpc_client.rpc", new=AsyncMock(return_value='{"ok":true}')) as rpc_mock:
+        from rpc_client import commit_guide_screen
+
+        await commit_guide_screen("intro:run")
+
+    rpc_mock.assert_awaited_once()
+    assert rpc_mock.await_args.args[0] == "commit_guide_screen"
+    assert rpc_mock.await_args.args[1] == {"key": "intro:run"}
 
 
 def test_deliver_pantalla_reply_defaults_to_responsive_nav_grace() -> None:
@@ -561,6 +509,7 @@ def test_analysis_scanning_instructions_forbid_welcome_replay() -> None:
     assert text is not None
     assert "PROHIBIDO ABSOLUTO" in text
     assert "bienvenida" in text.lower() or "welcome" in text.lower()
+    assert "lector" in text.lower() or "NFC" in text
     assert "SCAN" in text
 
 
@@ -830,7 +779,10 @@ def test_detail_revisit_always_narrates_with_varied_closing() -> None:
     "always narrate again, but vary the wording" — and the closing question
     must vary instead of repeating the identical phrase every dimension.
     """
-    assert "PROHIBIDO repetir el detalle de una dimensión ya narrada" not in NOVA_INSTRUCTIONS
+    assert (
+        "PROHIBIDO repetir el detalle de una dimensión ya narrada"
+        not in NOVA_INSTRUCTIONS
+    )
     idx = NOVA_INSTRUCTIONS.find("SIEMPRE narra de nuevo")
     assert idx != -1
     snippet = NOVA_INSTRUCTIONS[idx : idx + 700]
