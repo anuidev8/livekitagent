@@ -495,12 +495,17 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     ────────────────────────────────────────────────
     ANALYSIS SCANNING → COMPLETE → RESULTS (mismo globo)
     ────────────────────────────────────────────────
-    1) Scanning: narra con acompañamiento qué fuentes se revisan — anclado en
-       facts.sourceGroups / facts.narrationAnchors / facts.searchFindings del
-       informe real (LinkedIn, prensa, redes, sitios corporativos por nombre).
+    1) Scanning: si facts.hasReport es false → mensaje cálido (~2 frases):
+       no hemos encontrado un informe listo; cuando esté disponible lo revisan
+       juntos. PROHIBIDO inventar fuentes. PROHIBIDO invitar a continuar.
+       Si hay informe: narra con acompañamiento qué
+       fuentes se revisan — anclado en facts.sourceGroups / facts.narrationAnchors /
+       facts.searchFindings del informe real (nombres concretos del payload).
        Tono analista senior, creíble para C-level. PROHIBIDO inventar fuentes.
        Cuando el agente recibe [pantalla:analysis:complete]:
-    2) Complete: el globo se queda; las tarjetas de fuentes se actualizan
+    2) Complete: si facts.hasReport es false → mismo tono cálido (~2 frases),
+       sin CTA de avance, detalle ni reporte. Si hay informe: el globo se queda; las
+       tarjetas de fuentes se actualizan
        con el nombre de cada dimensión y su puntuación. ANTES de hablar,
        llama present_content(result_dimension, dimension_id=facts.
        strongestDimension.id) para resaltar en pantalla esa tarjeta — lo que
@@ -1286,17 +1291,26 @@ def _analysis_pantalla_instructions(dedupe_key: str) -> str | None:
             "funciona?», «¿Empezamos el análisis?», o cualquier frase de bienvenida. "
             "PROHIBIDO ABSOLUTO: manilla, lector NFC, identificación, acercarse al "
             "espejo/lector, attract, o pedir que se identifiquen — ESO YA PASÓ. "
-            "Narra SOLO el escaneo en vivo: fuentes que se revisan (facts.sourceGroups / "
-            "facts.narrationAnchors / facts.searchFindings) — LinkedIn, prensa, redes, "
-            "sitios. Tono analista senior. PROHIBIDO lista numerada. "
+            "Si facts.hasReport es false O no hay facts.sourceGroups/narrationAnchors/"
+            "searchFindings: mensaje cálido en español (~2 frases) — no hemos "
+            "encontrado un informe de huella listo; cuando esté disponible lo "
+            "revisan juntos aquí. PROHIBIDO inventar LinkedIn, prensa, redes, "
+            "sitios, hallazgos o scores. PROHIBIDO invitar a continuar. "
+            "Si hay datos reales: narra SOLO el escaneo en vivo con fuentes de "
+            "facts.sourceGroups / facts.narrationAnchors / facts.searchFindings. "
+            "Tono analista senior. PROHIBIDO lista numerada. "
             "PROHIBIDO navigate_journey. PROHIBIDO pedir continuar."
         )
     if dedupe_key == "analysis:complete":
         return (
             "ANALYSIS COMPLETE — get_session_state PRIMERO. "
             "PROHIBIDO repetir el saludo de welcome o «¿Vemos cómo funciona?». "
-            "Anuncia el standing con calidez desde facts.uiStandingLine (parafrasea, "
-            "no leas literal): rol, banda, dimensión más fuerte. "
+            "Si facts.hasReport es false: mensaje cálido (~2 frases) — no hemos "
+            "encontrado un informe listo; cuando esté disponible lo revisan juntos. "
+            "PROHIBIDO inventar scores, fuentes, fortalezas o brechas. "
+            "PROHIBIDO open_detail / send_report / reveal_results / invitar a continuar. "
+            "Si hay informe: anuncia el standing con calidez desde facts.uiStandingLine "
+            "(parafrasea, no leas literal): rol, banda, dimensión más fuerte. "
             "Añade UNA fortaleza y UNA brecha de facts. "
             "Invita a tocar una dimensión o «ver detalles». "
             "open_detail | reveal_results | send_report según availableActions."

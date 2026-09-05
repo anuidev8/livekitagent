@@ -53,7 +53,36 @@ class AnalysisTask(HuellaPhaseTask):
             state = {}
 
         phase = str(state.get("phase") or "scanning")
+        facts = state.get("facts") if isinstance(state.get("facts"), dict) else {}
+        has_report = facts.get("hasReport")
+        if has_report is None:
+            has_report = bool(facts.get("hasRealData")) if "hasRealData" in facts else None
+        # Explicit false → no package; missing keys with empty content also treat as no report
+        # when overallScore is 0 and dimensions list is empty.
+        content = state.get("content") if isinstance(state.get("content"), dict) else {}
+        dims = content.get("dimensions") if isinstance(content, dict) else None
+        dim_list = dims if isinstance(dims, list) else []
+        if has_report is None:
+            score = content.get("overallScore") if isinstance(content, dict) else None
+            has_report = bool(dim_list) or (isinstance(score, (int, float)) and score > 0)
+        no_report = has_report is False
+
         if phase == "results":
+            if no_report:
+                await generate_reply_safe(
+                    self.session,
+                    instructions=(
+                        "Habla con calidez en español, unas 2 frases cortas: "
+                        "por ahora no hemos encontrado un informe de huella listo "
+                        "para esta persona; cuando esté disponible, podrán "
+                        "revisarlo juntos aquí. "
+                        "PROHIBIDO inventar fuentes, scores o dimensiones. "
+                        "PROHIBIDO invitar a continuar, detalle, reporte o otro análisis. "
+                        "Cierra sin CTA de avance."
+                    ),
+                    tool_choice="none",
+                )
+                return
             await self._run_results_tour(state)
             if not await self._still_on_analysis():
                 return
@@ -73,6 +102,19 @@ class AnalysisTask(HuellaPhaseTask):
             return
 
         if phase == "complete":
+            if no_report:
+                await generate_reply_safe(
+                    self.session,
+                    instructions=(
+                        "Habla con calidez (~2 frases): por ahora no hemos "
+                        "encontrado un informe de huella listo para ti; cuando "
+                        "esté disponible, lo revisamos juntos aquí. "
+                        "PROHIBIDO inventar puntuaciones, fuentes, fortalezas o brechas. "
+                        "PROHIBIDO open_detail, send_report, reveal_results o invitar a continuar."
+                    ),
+                    tool_choice="none",
+                )
+                return
             await generate_reply_safe(
                 self.session,
                 instructions=(
@@ -88,11 +130,26 @@ class AnalysisTask(HuellaPhaseTask):
             )
             return
 
+        if no_report:
+            await generate_reply_safe(
+                self.session,
+                instructions=(
+                    "Habla con calidez (~2 frases): por ahora no hemos encontrado "
+                    "un informe de huella listo para ti; cuando esté disponible, "
+                    "lo revisamos juntos aquí. "
+                    "PROHIBIDO inventar LinkedIn, prensa, redes, sitios, hallazgos "
+                    "o puntuaciones. PROHIBIDO invitar a continuar. No llames herramientas."
+                ),
+                tool_choice="none",
+            )
+            return
+
         await generate_reply_safe(
             self.session,
             instructions=(
-                "Narra el análisis en curso sobre fuentes públicas. Sin inventar "
-                "hallazgos. Breve y tranquilizador. No llames herramientas."
+                "Narra el análisis en curso usando SOLO facts.sourceGroups / "
+                "facts.narrationAnchors / facts.searchFindings del estado. "
+                "Sin inventar hallazgos. Breve y tranquilizador. No llames herramientas."
             ),
             tool_choice="none",
         )
