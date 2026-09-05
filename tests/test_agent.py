@@ -699,79 +699,40 @@ def test_retake_photo_resets_review_guard_too() -> None:
     assert not guard.already_narrated("closing:delivered")
 
 
-def test_generating_keepalive_never_repeats_and_never_claims_completion() -> None:
-    """Feedback: while the card is generating, visitors heard the agent
-    either go dead silent for long stretches or repeat the same filler
-    phrase. Each keepalive tick must (a) carry a distinct SETI fact so
-    consecutive ticks never sound the same, (b) explicitly forbid repeating
-    prior phrasing, and (c) never claim the card/report is ready — that
-    would resurrect the original "sending" hallucination bug.
+def test_generating_keepalive_never_claims_completion() -> None:
+    """While the card generates, speak the fixed SETI purpose line and never
+    claim the card/report is ready.
     """
-    assert len(_GENERATING_SETI_FACTS) >= 4
-    assert len(set(_GENERATING_SETI_FACTS)) == len(_GENERATING_SETI_FACTS)
+    assert len(_GENERATING_SETI_FACTS) >= 1
+    assert "crecemos para nuestros clientes" in _GENERATING_SETI_FACTS[0].lower()
 
-    seen_facts = set()
     for tick in range(len(_GENERATING_SETI_FACTS)):
         instructions = _generating_keepalive_instructions(tick)
-        fact = _GENERATING_SETI_FACTS[tick]
-        assert fact in instructions
-        seen_facts.add(fact)
-        assert "PROHIBIDO repetir" in instructions
+        assert _GENERATING_SETI_FACTS[tick] in instructions
         assert "PROHIBIDO ABSOLUTO" in instructions
         assert "listos" in instructions or "listo" in instructions
 
-    # Every tick in one full cycle used a different fact.
-    assert len(seen_facts) == len(_GENERATING_SETI_FACTS)
-
-    # Cycling past the end of the list wraps around rather than crashing.
     wrapped = _generating_keepalive_instructions(len(_GENERATING_SETI_FACTS))
     assert _GENERATING_SETI_FACTS[0] in wrapped
 
 
 def test_generating_keepalive_grace_period_covers_longest_fact() -> None:
-    """Regression (2026-09-02, RM_3HK2n8CFPegT logs): the closing:delivered
-    handoff force-interrupted an in-flight SETI fact mid-word
-    ("...bajo el propósito «Crecemos para") because the shared pantalla
-    grace period (8s) was sized for the old one-line filler, not these
-    longer grounded facts. Guards against the grace period regressing
-    below what the longest fact needs at a conservative spoken pace, and
-    against reintroducing the verbose transition preamble that pushed the
-    original line over budget.
-    """
-    # Conservative: slower than the ~3.25 words/s implied by the incident
-    # (26 words spoken in the 8s before the cut), so this is a safety
-    # margin check, not a tight fit.
+    """Grace must cover the full SETI purpose line + short lead-in."""
     words_per_second = 2.5
     longest_fact_words = max(len(fact.split()) for fact in _GENERATING_SETI_FACTS)
-    # +6 words of headroom for whatever short lead-in the model adds.
     estimated_seconds = (longest_fact_words + 6) / words_per_second
     assert estimated_seconds <= _PANTALLA_INTERRUPT_GRACE_S
 
-    # The instructions must no longer suggest the long transition preamble
-    # that ate into the speaking budget in the incident.
     instructions = _generating_keepalive_instructions(0)
     assert "mientras se termina de armar tu tarjeta" not in instructions.lower()
-    assert "sin preámbulos largos" in instructions
 
 
-def test_generating_keepalive_requires_short_transition_not_cold_open() -> None:
-    """Feedback (2026-09-02, RM_MeiLzPnKgbwA logs): the SETI fact landed as a
-    cold, near-verbatim recitation with no lead-in at all — it read as a
-    company ad interrupting the wait, not as a "keeping you company" aside.
-    The earlier fix banned the old long preamble ("mientras se termina de
-    armar tu tarjeta...") for eating into the speaking budget and getting the
-    fact cut off mid-word. This asserts the replacement guidance requires a
-    much shorter transition (2-4 words) instead of swinging to "no
-    transition at all" — with a concrete example so the model isn't guessing.
-    """
+def test_generating_keepalive_requires_mientras_lead_in() -> None:
+    """Keep a «mientras tanto» framing so the SETI line is not a cold open."""
     instructions = _generating_keepalive_instructions(0)
-    assert "transici" in instructions.lower()
-    assert "2" in instructions and "4" in instructions
     assert "mientras tanto" in instructions.lower()
-    # Must not regress into the long banned preamble, and must keep the
-    # "no long preambles" ceiling from the earlier fix.
+    assert "mientras se genera tu tarjeta" in instructions.lower()
     assert "mientras se termina de armar tu tarjeta" not in instructions.lower()
-    assert "sin preámbulos largos" in instructions
 
 
 def test_delivered_voice_hint_covers_first_time_photo_request() -> None:
@@ -992,3 +953,16 @@ def test_welcome_ready_requires_data_consent_before_start() -> None:
     )
     assert "¿Vemos cómo funciona?" in after_consent or "cómo funciona" in after_consent
     assert "protección de datos" not in after_consent
+
+
+def test_generic_continue_word_is_never_treated_as_consent() -> None:
+    """Regression: logs showed the model call accept_data_consent right after
+    hearing "sí eh comenzar" — a generic continue phrase with no explicit
+    "acepto" — then immediately call start_experience in the same turn,
+    skipping real consent entirely. The prompt must explicitly rule this out.
+    """
+    for blob in (NOVA_INSTRUCTIONS, _USER_VOICE_TOOL_HINT):
+        assert "CONFUSIÓN PROHIBIDA" in blob or "NUNCA equivalen a consentimiento" in blob
+        assert "sí eh comenzar" in blob or "«sí, comencemos»" in blob or "sí, comencemos" in blob
+        assert "acepto" in blob.lower()
+        assert "autorizo" in blob.lower()

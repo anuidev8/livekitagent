@@ -32,12 +32,7 @@ from livekit.agents import (
 from livekit.plugins import ai_coustics, cartesia
 
 from knowledge_base import search_seti_knowledge
-from moderator_telemetry import (
-    is_throttle_error,
-    job_dispatch_meta,
-    report_voice_telemetry,
-    usage_deltas_from_event,
-)
+from moderator_telemetry import is_throttle_error, report_voice_telemetry
 from narration_barrier import NarrationBarrier, set_session_narration_barrier
 from nova_session_continuation import (
     install_nova_session_continuation_fix,
@@ -72,19 +67,12 @@ if not getattr(_root_logger, "_huella_guide_log_configured", False):
     _LOGS_DIR = Path(__file__).parent.parent / "logs"
     _LOGS_DIR.mkdir(exist_ok=True)
 
-    _log_started = datetime.now().astimezone()
-    _LOG_FILE = (
-        _LOGS_DIR
-        / f"{_log_started.strftime('%Y-%m-%d_%H-%M-%S')}.log"
-    )
+    _LOG_FILE = _LOGS_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 
     _file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
     _file_handler.setLevel(logging.DEBUG)
     _file_handler.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+        logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
     )
 
     # Attach to the root logger so ALL livekit / agent log lines are captured.
@@ -95,13 +83,6 @@ if not getattr(_root_logger, "_huella_guide_log_configured", False):
     _all_logs = sorted(_LOGS_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
     for _old in _all_logs[:-30]:
         _old.unlink(missing_ok=True)
-
-    logging.getLogger("agent").info(
-        "log file opened path=%s started_at=%s tz=%s",
-        _LOG_FILE,
-        _log_started.isoformat(timespec="seconds"),
-        _log_started.tzname() or _log_started.strftime("%z"),
-    )
 # ─────────────────────────────────────────────────────────────────────────────
 
 # FIXED (2026-09-02, RM_vZnfXrLvRboG logs): a recycle landing mid-conversation
@@ -434,15 +415,28 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     «realizaré el saludo», «entendido». Entra directo al contenido.
     PASO 1 — SOLO habla: saluda con el nombre real + rol/empresa reales. 2-3 oraciones:
        qué es Huella Digital y que explorarán su presencia. Si availableActions incluye
-       accept_data_consent (o facts.dataConsentRequired=true): pide marcar el check de
-       protección de datos en pantalla (o decir «acepto»). Si ya aceptó, invita a
-       continuar («¿Vemos cómo funciona?»). PARA.
+       accept_data_consent (o facts.dataConsentRequired=true): pide EXPLÍCITAMENTE el
+       consentimiento — «¿Aceptas el tratamiento de tus datos personales conforme a la
+       política de protección de datos de SETI?» — o pide marcar el check en pantalla.
+       Si ya aceptó, invita a continuar («¿Vemos cómo funciona?»). PARA.
        PROHIBIDO llamar navigate_journey mientras hablas en este paso —
-       EXCEPTO si el visitante ya dijo «acepto» / aceptó datos en este mismo
-       momento: entonces llama navigate_journey(accept_data_consent) de inmediato.
+       EXCEPTO si el visitante YA dijo una palabra de consentimiento explícita
+       (ver PASO 2) en este mismo turno: entonces llama navigate_journey(accept_data_consent)
+       de inmediato.
     PASO 2 — Consentimiento de datos (OBLIGATORIO si accept_data_consent está en
-       availableActions): cuando diga acepto / de acuerdo / sí acepto / marcar check,
-       o confirme que marcó el check: llama navigate_journey(accept_data_consent).
+       availableActions): llama navigate_journey(accept_data_consent) SOLO cuando el
+       visitante use una palabra de consentimiento EXPLÍCITA referida a los datos —
+       «acepto», «sí, acepto», «acepto el tratamiento», «autorizo», «de acuerdo» — o
+       confirme que marcó el check.
+       CONFUSIÓN PROHIBIDA: un «sí» suelto, o palabras de continuar como «comenzar»,
+       «empecemos», «empezamos», «adelante», «vamos», «dale», «listo», «continuar»
+       — INCLUSO combinadas con «sí» (p. ej. «sí, comencemos», «sí eh comenzar») —
+       NUNCA equivalen a consentimiento. Esas son señales de PASO 3, no de PASO 2.
+       Si el visitante dice una de esas palabras de continuar y accept_data_consent
+       SIGUE en availableActions (o sea, aún no ha aceptado), NO llames
+       accept_data_consent ni start_experience: pregunta explícitamente el
+       consentimiento («¿Aceptas el tratamiento de tus datos personales?») y ESPERA
+       una respuesta con «acepto»/«autorizo»/«de acuerdo».
        PROHIBIDO start_experience mientras accept_data_consent siga en availableActions.
     PASO 3 — Después de que el consentimiento esté hecho (start_experience en
        availableActions) y el visitante confirme continuar / adelante / seguimos /
@@ -614,16 +608,21 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
       Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla ni reformularla
       con otras palabras mientras esperas, sin importar cuánto tarde el visitante
       en colocarse. Cuando confirme (listo, toma la foto, adelante):
-      navigate_journey(ready_for_picture). Si no dice nada, el botón
-      «Estoy listo» en pantalla también funciona.
-    - generating: locución CORTA — componiendo entrega para su correo. Dila
-      UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla o reformularla con
-      otras palabras, PROHIBIDO volver a llamar get_session_state por tu
-      cuenta para dar otra actualización, sin importar cuánto tarde.
+      navigate_journey(ready_for_picture) PRIMERO y SILENCIO TOTAL — el
+      contador/disparo es solo visual. PROHIBIDO hablar durante el countdown.
+      PROHIBIDO el mensaje SETI / «mientras se genera» aquí (solo en generating).
+      Si no dice nada, el botón «Estoy listo» en pantalla también funciona.
+    - capture / shutter: UNA frase MUY corta al iniciar el contador (ánimo /
+      quédate así / sonríe) — UNA vez, luego SILENCIO. PROHIBIDO contar 3-2-1
+      en voz y PROHIBIDO el mensaje SETI (solo en generating).
+    - generating: UNA locución — abre con «Mientras se genera tu tarjeta,» (o
+      «Mientras tanto,») y di el mensaje de propósito de SETI (entendemos el
+      negocio antes de proponer solución; la tecnología genera valor ante
+      desafíos reales; crecemos para nuestros clientes). Dila UNA SOLA VEZ
+      y luego SILENCIO. PROHIBIDO «componiendo / armando / diseñando».
       PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos o
-      generados — eso NO es verdad todavía en esta fase; solo lo dirás
-      cuando de verdad llegue [pantalla:closing:delivered].
-      PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla).
+      generados — eso NO es verdad todavía; solo cuando llegue
+      [pantalla:closing:delivered]. PROHIBIDO pedir tomar foto.
     - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
       e imagen van juntos a su correo. Si facts.photoSkipped es true, ofrece
       «Enviar reporte» o tomarse una foto para su tarjeta (navigate_journey(retake_photo)
@@ -933,8 +932,11 @@ class Assistant(Agent):
         self, context: RunContext, action: str, dimension_id: str = "", index: int = -1
     ) -> str:
         """Ejecuta una acción disponible en la experiencia.
-        - accept_data_consent: en welcome:ready cuando el visitante acepta
-          el tratamiento / protección de datos (checkbox o «acepto»).
+        - accept_data_consent: en welcome:ready SOLO cuando el visitante da
+          consentimiento EXPLÍCITO al tratamiento de datos — checkbox marcado
+          o dice «acepto»/«autorizo»/«de acuerdo». Un «sí» suelto o palabras
+          de continuar («comenzar», «empezamos», «adelante», «vamos», «dale»,
+          «listo») NO son consentimiento, ni siquiera combinadas con «sí».
           Obligatorio antes de start_experience si aparece en availableActions.
         - start_experience: en welcome:ready SOLO tras consentimiento de datos
           (cuando start_experience esté en availableActions).
@@ -1136,12 +1138,18 @@ _USER_VOICE_TOOL_HINT = (
     "en ese mismo turno; si lo dices sin llamarlo, el visitante se queda viendo "
     "la misma pantalla mientras tú hablas como si ya hubiera cambiado. "
     "Si step=welcome y phase=ready: "
-    "1) Si availableActions incluye accept_data_consent y el visitante acepta "
-    "(acepto, de acuerdo, sí acepto, ya marqué el check, autorizo): "
-    "navigate_journey(accept_data_consent) de inmediato. "
-    "2) Si pide continuar SIN consentimiento (sí, continúa, adelante, comienza, "
-    "empezamos, listo, vamos, dale) y accept_data_consent aún está disponible: "
-    "recuerda el check de protección de datos — NO llames start_experience. "
+    "1) Si availableActions incluye accept_data_consent Y el visitante usa una "
+    "palabra de consentimiento EXPLÍCITA (acepto, de acuerdo, sí acepto, ya marqué "
+    "el check, autorizo, acepto el tratamiento): navigate_journey(accept_data_consent) "
+    "de inmediato. "
+    "2) CONFUSIÓN PROHIBIDA — un «sí» suelto, o palabras de continuar (continúa, "
+    "adelante, comienza, comenzar, empezamos, listo, vamos, dale) NUNCA cuentan "
+    "como consentimiento, NI SIQUIERA combinadas con «sí» (ej.: «sí eh comenzar», "
+    "«sí, comencemos» NO son consentimiento). Si el visitante dice solo eso y "
+    "accept_data_consent aún está disponible: NO llames accept_data_consent ni "
+    "start_experience — pregunta explícitamente «¿Aceptas el tratamiento de tus "
+    "datos personales conforme a la política de protección de datos?» y espera "
+    "una respuesta con acepto/autorizo/de acuerdo. "
     "3) Solo cuando start_experience esté en availableActions y confirme continuar: "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
@@ -1210,8 +1218,15 @@ def _pantalla_dedupe_key(text: str) -> str:
         "step=closing" in text and "phase=photo_consent" in text
     ):
         return "closing:photo_consent"
-    if "closing:photo" in text:
+    if "closing:photo" in text or "closing:pose" in text or (
+        "step=closing" in text and "phase=pose" in text
+    ):
         return "closing:photo"
+    if "closing:countdown" in text or (
+        "step=closing" in text
+        and ("phase=capture" in text or "phase=shutter" in text)
+    ):
+        return "closing:countdown"
     if "closing:review" in text or ("step=closing" in text and "phase=review" in text):
         return "closing:review"
     if "closing:generating" in text:
@@ -1341,7 +1356,25 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "UNA locución: invita al visitante a colocarse frente al espejo para la foto. "
             "Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla o reformularla "
             "con otras palabras mientras esperas a que se coloque, sin importar cuánto "
-            "tarde. Si confirman estar listos: navigate_journey(ready_for_picture)."
+            "tarde. Si confirman estar listos: LLAMA navigate_journey(ready_for_picture) "
+            "PRIMERO y luego SILENCIO TOTAL en ese mismo turno — el contador 3-2-1 es "
+            "solo visual; PROHIBIDO contar en voz, decir «sonríe», o narrar el disparo. "
+            "PROHIBIDO ABSOLUTO decir el mensaje de SETI / «mientras se genera tu "
+            "tarjeta» aquí — eso SOLO cuando llegue [pantalla:closing:generating]."
+        )
+    if "closing:countdown" in text or (
+        "step=closing" in text
+        and ("phase=capture" in text or "phase=shutter" in text)
+    ):
+        return (
+            "CLOSING COUNTDOWN — el contador de la foto ya corre en pantalla. "
+            "UNA frase MUY corta (máx ~8 palabras), cálida, sobre la toma — "
+            "ejemplos de tono: «Quédate así, ya casi…», «Sonríe al espejo, "
+            "perfecto», «Un segundo, capturando…». "
+            "Dila UNA SOLA VEZ y luego SILENCIO hasta review. "
+            "PROHIBIDO contar 3-2-1 en voz (la UI ya cuenta). "
+            "PROHIBIDO ABSOLUTO el mensaje de SETI / «mientras se genera tu "
+            "tarjeta» — eso SOLO en [pantalla:closing:generating]."
         )
     if "closing:review" in text or ("step=closing" in text and "phase=review" in text):
         return (
@@ -1357,19 +1390,15 @@ def _closing_pantalla_instructions(text: str) -> str | None:
     if "closing:generating" in text:
         return (
             "CLOSING GENERATING — get_session_state. "
-            "Locución CORTA (1-2 frases): componiendo tarjeta e informe para su correo. "
-            "PROHIBIDO pedir tomar foto (ya se tomó, o el visitante prefirió omitirla). "
-            "Di esta locución UNA SOLA VEZ y luego SILENCIO — no la repitas, no la "
-            "reformules con otras palabras («diseñando», «armando», «casi listo», etc.), "
-            "y PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos, "
-            "generados o pueden enviarse — eso no es cierto todavía en esta fase. "
-            "No vuelvas a llamar get_session_state por tu cuenta ni des ninguna "
-            "actualización más POR INICIATIVA PROPIA, sin importar cuánto tarde — "
-            "quédate en silencio hasta la próxima instrucción. Si el sistema te "
-            "envía una nueva instrucción de espera con un dato de SETI, ese es un "
-            "aviso legítimo del sistema, no algo que decidiste tú: síguela con "
-            "una locución breve y distinta, sin comentar que estás siguiendo una "
-            "instrucción."
+            "NO digas «estamos componiendo / armando / diseñando tu tarjeta». "
+            "En su lugar, UNA locución: abre con «Mientras se genera tu tarjeta,» "
+            "(o «Mientras tanto,») y di este mensaje de SETI, casi literal: "
+            "«En SETI entendemos el negocio antes de proponer una solución, porque "
+            "sabemos que la tecnología sólo genera valor cuando responde a desafíos "
+            "reales. En SETI, crecemos para nuestros clientes.» "
+            "PROHIBIDO pedir tomar foto. PROHIBIDO decir que la tarjeta/informe YA "
+            "están listos. Di esto UNA VEZ y luego SILENCIO hasta la próxima "
+            "instrucción del sistema o [pantalla:closing:delivered]."
         )
     if "closing:delivered" in text:
         return (
@@ -1481,6 +1510,7 @@ class _PantallaGuard:
         if action == "retake_photo":
             for key in (
                 "closing:photo",
+                "closing:countdown",
                 "closing:review",
                 "closing:generating",
                 "closing:delivered",
@@ -1488,78 +1518,42 @@ class _PantallaGuard:
                 self.forget_narrated(key)
             logger.info(
                 "[navigate_journey] retake_photo — reset closing pantalla guards "
-                "(photo, review, generating, delivered)"
+                "(photo, countdown, review, generating, delivered)"
             )
 
 
-# Grounded facts for the closing:generating wait — same canonical numbers as
-# knowledge_base._OVERVIEW (identity, PRIME model, clients, partners, success
-# cases), rewritten as short standalone spoken lines. Used to fill dead air
-# while the card/report is being composed, instead of the model either going
-# fully silent for 20-40s or (worse, seen in real sessions) improvising
-# repeated/ungrounded filler. Never invent new SETI facts elsewhere in this
-# file — this tuple and knowledge_base.py are the only sources of truth.
+# Spoken while closing:generating — single SETI aside (no rotating fact list).
 _GENERATING_SETI_FACTS: tuple[str, ...] = (
-    "SETI S.A.S. lleva 29 años ayudando a que sus clientes crezcan con "
-    'tecnología, bajo el propósito "Crecemos para nuestros clientes".',
-    "SETI hace parte del holding KATIO Sistemas Globales Informáticos, con "
-    "sede en Madrid, y atiende a más de 160 clientes corporativos.",
-    "El modelo PRIME de SETI combina desarrollo de software, ingeniería de "
-    "datos e inteligencia artificial, nube, y operación de infraestructura "
-    "24/7.",
-    "SETI es partner certificado de AWS, Microsoft, Google Cloud, Oracle, "
-    "MongoDB e IBM.",
-    "SETI ha liderado migraciones críticas como la de BTG Pactual, con "
-    "ahorros de costos comprobados para sus clientes.",
-    "Detrás de SETI hay más de mil colaboradores especializados en tecnología.",
+    "En SETI entendemos el negocio antes de proponer una solución, porque "
+    "sabemos que la tecnología sólo genera valor cuando responde a desafíos "
+    "reales. En SETI, crecemos para nuestros clientes.",
 )
 
 _GENERATING_KEEPALIVE_FIRST_DELAY_S = 14.0
-_GENERATING_KEEPALIVE_REPEAT_S = 16.0
-# Bounded so a stuck/never-arriving closing:delivered can't turn this into
-# indefinite chatter — after this many ticks it goes back to full silence,
-# same as the old one-shot behavior.
-_GENERATING_KEEPALIVE_MAX_TICKS = 6
+_GENERATING_KEEPALIVE_REPEAT_S = 18.0
+# Entry cue already speaks the single SETI purpose line. Keepalive would
+# re-say the same phrase (~14s later) — seen in 2026-09-05_13-05-33 logs.
+# Leave at 0 so we only schedule filler if we reintroduce distinct facts.
+_GENERATING_KEEPALIVE_MAX_TICKS = 0
 
 
 def _generating_keepalive_instructions(tick: int) -> str:
     """Instructions for the Nth (0-indexed) closing:generating filler line.
 
-    Regression: visitors reported the wait feeling dead, and in real
-    sessions the model — with nothing new to say and no further guidance —
-    fell back to literally repeating its own prior line. Nova sees the full
-    turn history, so a verbatim repeat reads as the agent being stuck. Each
-    tick must therefore sound different from every earlier one in this
-    phase; ticks after the first pivot to one grounded SETI fact apiece
-    (cycling through `_GENERATING_SETI_FACTS`), framed as a brief
-    "while we wait" aside — never as if the card were ready.
-
-    Regression (2026-09-02, RM_MeiLzPnKgbwA logs): with zero lead-in
-    guidance, the model recited the SETI fact almost verbatim and cold —
-    it landed like a company ad interrupting the wait rather than a "keeping
-    you company" aside. An earlier fix had banned a *long* fixed preamble
-    ("mientras se termina de armar tu tarjeta...") for eating into the
-    speaking budget and getting the fact cut off mid-word — the fix here is
-    a much shorter (2-4 word) transition, not the absence of one.
+    Uses the fixed SETI purpose line — framed as a brief «mientras tanto»
+    aside, never as if the card were ready.
     """
     fact = _GENERATING_SETI_FACTS[tick % len(_GENERATING_SETI_FACTS)]
     return (
         "CLOSING GENERATING — la tarjeta sigue en proceso, el visitante "
-        "sigue esperando. Locución MUY corta (1 frase, sin preámbulos "
-        "largos — ve directo casi al dato, sin frases de relleno antes), en "
-        "tus propias palabras, DISTINTA a cualquier frase ya dicha en esta "
-        "fase (incluida la primera locución al entrar a esta pantalla) — "
-        "PROHIBIDO repetir o reformular algo ya dicho. Abre con una "
-        "transición ultra breve de 2 a 4 palabras («mientras tanto,», "
-        "«aprovechando la espera,», «de paso,» o similar) para que no "
-        "suene como una interrupción en frío — nunca sueltes el dato "
-        "directamente sin esa transición. Usa este dato real de SETI como "
-        "contenido, parafraseado, breve, tono cálido, NUNCA leído literal: "
-        f"«{fact}» PROHIBIDO ABSOLUTO decir o insinuar que la tarjeta o el "
-        "informe YA están listos, generados o pueden enviarse — eso solo es "
-        "cierto cuando llegue de verdad [pantalla:closing:delivered]. Tras "
-        "decirla, SILENCIO otra vez hasta la próxima actualización o hasta "
-        "que llegue esa pantalla."
+        "sigue esperando. Locución corta: abre con «Mientras tanto,» (o "
+        "«Mientras se genera tu tarjeta,») y di este mensaje de SETI en "
+        "español natural, casi literal — no inventes otros datos: "
+        f"«{fact}» "
+        "PROHIBIDO pedir foto. PROHIBIDO ABSOLUTO decir o insinuar que la "
+        "tarjeta o el informe YA están listos, generados o pueden enviarse — "
+        "eso solo es cierto cuando llegue [pantalla:closing:delivered]. "
+        "Tras decirla, SILENCIO hasta la próxima instrucción o esa pantalla."
     )
 
 
@@ -1616,7 +1610,9 @@ _SESSION_RECONNECTED_INSTRUCTIONS = (
 # session.interrupt() then generate_reply). A 2s wait left welcome audio
 # playing on intro/analysis (2026-09-04_12-59-37 logs). Generating filler
 # still uses the long grace explicitly.
-_PANTALLA_INTERRUPT_GRACE_S = 12.0
+# Long enough for the full SETI purpose line + short «mientras tanto» lead-in
+# (~29 words ≈ 14s at 2.5 w/s) without cutting mid-sentence on delivered.
+_PANTALLA_INTERRUPT_GRACE_S = 16.0
 _PANTALLA_INTERRUPT_GRACE_NAV_S = 0.0
 
 # Keep strong refs to fire-and-forget wait-then-speak tasks so they can't be
@@ -1651,6 +1647,7 @@ def _deliver_pantalla_reply(
     grace_s: float = _PANTALLA_INTERRUPT_GRACE_NAV_S,
     pantalla_guard: _PantallaGuard | None = None,
     dedupe_key: str | None = None,
+    speak: bool = True,
 ) -> None:
     """Speak `instructions` only after a real kill of prior speech/tools.
 
@@ -1667,6 +1664,8 @@ def _deliver_pantalla_reply(
 
     After kill, ``commit_guide_screen`` reveals the pending UI, then
     ``generate_reply`` starts — view + speech together (not UI-first).
+    Pass speak=False for silence-only screens (photo countdown) — kill +
+    commit, no new locution.
 
     Freshness: pass pantalla_guard + dedupe_key so this checks
     _PantallaGuard.last_key right before speaking and drops itself if a newer
@@ -1733,6 +1732,12 @@ def _deliver_pantalla_reply(
             return
 
         await _commit_guide_screen(dedupe_key)
+        if not speak:
+            logger.info(
+                "[text_input] silence-only pantalla (no generate_reply): %s",
+                dedupe_key,
+            )
+            return
         reply_kwargs: dict = {"instructions": instructions}
         chat_ctx = build_pantalla_chat_ctx(agent_session)
         if chat_ctx is not None:
@@ -2052,13 +2057,19 @@ async def my_agent(ctx: JobContext):
                     "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
                     "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
                     "Si availableActions incluye accept_data_consent (o facts.dataConsentRequired): "
-                    "pide marcar el check de protección de datos (o decir «acepto»). "
+                    "pide EXPLÍCITAMENTE el consentimiento — «¿Aceptas el tratamiento de tus "
+                    "datos personales conforme a la política de protección de datos de SETI?» "
+                    "— o pide marcar el check de protección de datos. "
                     "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
                     "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso "
-                    "(salvo accept_data_consent si ya dijo «acepto» en este turno). "
+                    "(salvo accept_data_consent si ya dijo acepto/autorizo/de acuerdo EXPLÍCITAMENTE "
+                    "en este turno — un «sí» suelto o «comenzar/empezamos/adelante/vamos/dale/listo», "
+                    "incluso junto a «sí», NO cuenta como consentimiento). "
                     "PARA y espera. "
-                    "PASO 2 — consentimiento: si dice acepto / de acuerdo / autorizo, "
-                    "llama navigate_journey(accept_data_consent). "
+                    "PASO 2 — consentimiento: si dice acepto / de acuerdo / autorizo (no un «sí» "
+                    "genérico ni una palabra de continuar), llama navigate_journey(accept_data_consent). "
+                    "Si dice solo una palabra de continuar sin esas palabras de consentimiento: "
+                    "NO llames accept_data_consent — pregunta el consentimiento explícito y espera. "
                     "PROHIBIDO start_experience mientras accept_data_consent esté en availableActions. "
                     "PASO 3 — solo cuando start_experience esté disponible y confirme "
                     "(sí / continuar / adelante / vamos / dale): "
@@ -2072,6 +2083,24 @@ async def my_agent(ctx: JobContext):
                 )
             elif closing_instructions:
                 once_key = dedupe_key
+                # Touch retake / photo-accept re-enters pose without
+                # navigate_journey(retake_photo), so once-keys must clear here.
+                # BUG (2026-09-05): used bare `text` → NameError; pantalla never
+                # ran → no interrupt, no pose invite (consent speech kept playing).
+                pose_reentry = once_key in ("closing:photo", "closing:pose") and (
+                    "CLOSING_RETAKE" in event.text
+                    or "CLOSING_PHOTO_ACCEPT" in event.text
+                )
+                if pose_reentry:
+                    _pantalla_guard.on_navigate_action("retake_photo")
+                    logger.info(
+                        "[text_input] closing pose re-entry — cleared once-keys "
+                        "(%s)",
+                        once_key,
+                    )
+                # Normalize pose aliases onto the once-key used for first visit.
+                if once_key == "closing:pose":
+                    once_key = "closing:photo"
                 if _pantalla_already_narrated(once_key):
                     logger.info(
                         "[text_input] Skipping repeat closing pantalla: %s", once_key
@@ -2081,6 +2110,7 @@ async def my_agent(ctx: JobContext):
                 # photo_consent / delivered / thanks are real screen changes —
                 # interrupt immediately (nav grace). Only generating filler
                 # keeps the long grace so SETI facts aren't cut mid-sentence.
+                # Countdown: short photo aside once; generating keeps long grace.
                 closing_grace = (
                     _PANTALLA_INTERRUPT_GRACE_S
                     if once_key == "closing:generating"
@@ -2093,7 +2123,7 @@ async def my_agent(ctx: JobContext):
                     pantalla_guard=_pantalla_guard,
                     dedupe_key=dedupe_key,
                 )
-                if once_key == "closing:generating":
+                if once_key == "closing:generating" and _GENERATING_KEEPALIVE_MAX_TICKS > 0:
                     task = asyncio.create_task(
                         _generating_keepalive(agent_session, once_key)
                     )
@@ -2176,8 +2206,6 @@ async def my_agent(ctx: JobContext):
     # ──────────────────────────────────────────────────────────────────────────
 
     _telemetry_tasks: set[asyncio.Task[None]] = set()
-    _dispatch_meta = job_dispatch_meta(ctx)
-    _kiosk_id = str(_dispatch_meta.get("kioskId") or "").strip() or None
 
     def _spawn_telemetry(coro) -> None:
         task = asyncio.create_task(coro)
@@ -2198,7 +2226,6 @@ async def my_agent(ctx: JobContext):
             report_voice_telemetry(
                 event,
                 room=ctx.room.name,
-                kiosk_id=_kiosk_id,
                 detail=f"{type(err).__name__}: {err}",
             )
         )
@@ -2218,30 +2245,28 @@ async def my_agent(ctx: JobContext):
             NOVA_SESSION_REFRESH_SECONDS,
         )
 
-    _usage_totals = {"input": 0, "output": 0, "tokens": 0, "characters": 0}
+    _last_usage_tokens = 0
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:
-        nonlocal _usage_totals
-        _usage_totals, deltas = usage_deltas_from_event(ev, _usage_totals)
-        if (
-            deltas["tokens"] <= 0
-            and deltas["characters"] <= 0
-            and deltas["input"] <= 0
-            and deltas["output"] <= 0
-        ):
-            return
-        _spawn_telemetry(
-            report_voice_telemetry(
-                "usage",
-                tokens=deltas["tokens"] or None,
-                input_tokens=deltas["input"] or None,
-                output_tokens=deltas["output"] or None,
-                characters=deltas["characters"] or None,
-                room=ctx.room.name,
-                kiosk_id=_kiosk_id,
+        nonlocal _last_usage_tokens
+        usage = getattr(ev, "usage", None)
+        model_usage = getattr(usage, "model_usage", None) or []
+        total = 0
+        for item in model_usage:
+            total += int(getattr(item, "input_tokens", 0) or 0)
+            total += int(getattr(item, "output_tokens", 0) or 0)
+            total += int(getattr(item, "total_tokens", 0) or 0)
+        delta = max(0, total - _last_usage_tokens)
+        _last_usage_tokens = total
+        if delta > 0:
+            _spawn_telemetry(
+                report_voice_telemetry(
+                    "usage",
+                    tokens=delta,
+                    room=ctx.room.name,
+                )
             )
-        )
 
     @session.on("user_input_transcribed")
     def _on_user_speech(event) -> None:
@@ -2320,14 +2345,10 @@ async def my_agent(ctx: JobContext):
         record=_telemetry_record_option(),
     )
 
-    await report_voice_telemetry(
-        "session_start", room=ctx.room.name, kiosk_id=_kiosk_id
-    )
+    await report_voice_telemetry("session_start", room=ctx.room.name)
 
     async def _report_session_end() -> None:
-        await report_voice_telemetry(
-            "session_end", room=ctx.room.name, kiosk_id=_kiosk_id
-        )
+        await report_voice_telemetry("session_end", room=ctx.room.name)
 
     ctx.add_shutdown_callback(_report_session_end)
 

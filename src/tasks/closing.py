@@ -35,12 +35,20 @@ class ClosingTask(HuellaPhaseTask):
                 screen are also available if voice is not responding.
 
                 closing:pose — Guide the visitor to position themselves in front of the
-                camera. When they confirm → navigate_journey(ready_for_picture).
+                camera. When they confirm → navigate_journey(ready_for_picture) then
+                SILENCE (countdown is visual only). Never speak SETI / generating here.
 
-                closing:capture / shutter / generating / delivered / thanks — narrate
-                each phase in sync with what is on screen. On delivered: invite the visitor
-                to review the card, mention informe + foto go together to their email, and
-                explicitly offer TWO options — «Enviar reporte» or «repetir la foto»
+                closing:capture / shutter — ONE very short pep line when countdown
+                starts («Quédate así…» / «Sonríe…»), once, then SILENCE. Never
+                count 3-2-1 aloud; never speak SETI / «mientras se genera» here.
+
+                closing:generating — «Mientras se genera…» + SETI purpose line ONCE,
+                then SILENCE. Never claim the card is ready.
+
+                closing:delivered / thanks — narrate in sync with what is on screen.
+                On delivered: invite the visitor to review the card, mention informe +
+                foto go together to their email, and explicitly offer TWO options —
+                «Enviar reporte» or «repetir la foto»
                 (navigate_journey(retake_photo) → goes back to pose for another take).
                 If they say repetir / otra foto / retake / no me gusta: navigate_journey(retake_photo).
                 On thanks: warm farewell + invite QR scan + navigate_journey finish when confirmed.
