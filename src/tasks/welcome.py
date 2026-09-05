@@ -45,9 +45,12 @@ class WelcomeTask(HuellaPhaseTask):
 
                 phase ready — NOW greet using the dynamic profile name, role, and
                 company from get_session_state. One executive purpose sentence.
-                Guide CTAs from availableActions (empezar / avanzar / volver) by
-                intent, not keywords. navigate_journey start_experience only when
-                they want to proceed; back/cancel when they want to leave.
+                If availableActions includes accept_data_consent: ask them to mark
+                the data-protection checkbox (or say «acepto»), then
+                navigate_journey(accept_data_consent). Only when start_experience
+                is in availableActions and they want to proceed, call
+                navigate_journey(start_experience). Never start_experience without
+                consent. back/cancel when they want to leave.
 
                 If the step is no longer welcome, call return_to_supervisor.
                 """
@@ -68,7 +71,9 @@ class WelcomeTask(HuellaPhaseTask):
                 self.session,
                 instructions=(
                     "phase ready: saluda con el perfil dinámico de get_session_state "
-                    "(nombre, cargo, empresa) y guía el CTA de empezar."
+                    "(nombre, cargo, empresa). Si availableActions incluye "
+                    "accept_data_consent, pide marcar el check de protección de datos "
+                    "(o decir «acepto»). Solo después, guía el CTA de empezar."
                 ),
                 tool_choice="auto",
                 tools=["get_session_state", "navigate_journey"],
@@ -84,8 +89,9 @@ class WelcomeTask(HuellaPhaseTask):
             self.session,
             instructions=(
                 "Si phase es ready, saluda ya con nombre, cargo y empresa del "
-                "perfil dinámico y guía el CTA. Si aún preparing, tranquiliza "
-                "brevemente y espera."
+                "perfil dinámico. Si hace falta consentimiento de datos "
+                "(accept_data_consent en availableActions), pídelo antes de empezar. "
+                "Si aún preparing, tranquiliza brevemente y espera."
             ),
             tool_choice="auto",
             tools=["get_session_state", "navigate_journey", "present_content"],

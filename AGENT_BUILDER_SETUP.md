@@ -38,7 +38,7 @@ Names and parameter shapes must match exactly. The frontend validates actions ag
 ### `navigate_journey`
 
 - Parameters:
-  - `action` (required string): `advance`, `back`, `start_experience`, `start_analysis`, `open_detail`, `send_report`, `skip_report`, `ready_for_picture`, `capture_picture`, `finish`, or `cancel`
+  - `action` (required string): `advance`, `back`, `start_experience`, `accept_data_consent`, `start_analysis`, `open_detail`, `send_report`, `skip_report`, `ready_for_picture`, `capture_picture`, `finish`, or `cancel`
   - `dimensionId` (optional string): dimension to open when the action is `open_detail`
 - Purpose: perform a semantic navigation or confirmation after the user's intent is clear.
 - Example result:

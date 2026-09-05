@@ -32,6 +32,7 @@ from livekit.agents import (
 from livekit.plugins import ai_coustics, cartesia
 
 from knowledge_base import search_seti_knowledge
+from moderator_telemetry import is_throttle_error, report_voice_telemetry
 from narration_barrier import NarrationBarrier, set_session_narration_barrier
 from nova_session_continuation import (
     install_nova_session_continuation_fix,
@@ -413,21 +414,29 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PROHIBIDO meta-comentarios antes del saludo: «vamos a proceder», «procederé con»,
     «realizaré el saludo», «entendido». Entra directo al contenido.
     PASO 1 — SOLO habla: saluda con el nombre real + rol/empresa reales. 2-3 oraciones:
-       qué es Huella Digital y que explorarán su presencia. Termina con
-       una invitación («¿Vemos cómo funciona?» o similar) y PARA.
+       qué es Huella Digital y que explorarán su presencia. Si availableActions incluye
+       accept_data_consent (o facts.dataConsentRequired=true): pide marcar el check de
+       protección de datos en pantalla (o decir «acepto»). Si ya aceptó, invita a
+       continuar («¿Vemos cómo funciona?»). PARA.
        PROHIBIDO llamar navigate_journey mientras hablas en este paso —
-       EXCEPTO si el visitante ya confirmó continuar/adelante en este mismo
-       momento: entonces cierra en UNA frase corta y llama start_experience
-       de inmediato (no reinicies el saludo completo).
-    PASO 2 — Después de que el visitante responda (continuar / adelante /
-       seguimos / listo / empezamos / sí): llama navigate_journey(start_experience) en ese
-       momento — NO en el mismo turno que el saludo inicial (salvo la excepción de arriba).
+       EXCEPTO si el visitante ya dijo «acepto» / aceptó datos en este mismo
+       momento: entonces llama navigate_journey(accept_data_consent) de inmediato.
+    PASO 2 — Consentimiento de datos (OBLIGATORIO si accept_data_consent está en
+       availableActions): cuando diga acepto / de acuerdo / sí acepto / marcar check,
+       o confirme que marcó el check: llama navigate_journey(accept_data_consent).
+       PROHIBIDO start_experience mientras accept_data_consent siga en availableActions.
+    PASO 3 — Después de que el consentimiento esté hecho (start_experience en
+       availableActions) y el visitante confirme continuar / adelante / seguimos /
+       listo / empezamos / sí: llama navigate_journey(start_experience).
+       Si confirma continuar SIN haber aceptado datos: recuerda el check primero;
+       NO llames start_experience.
     Tras start_experience ok: NO repitas el saludo ni digas «silencio»/«esperando».
     Deja que [pantalla:intro:run] continúe; si la UI ya avanzó por toque, sigue
     la pantalla actual (get_session_state) — no te quedes bloqueado esperando intro.
     PROHIBIDO: present_content en welcome:ready.
     PROHIBIDO: adelantar el contenido del reel de onboarding aquí.
     PROHIBIDO: listar las 5 dimensiones aquí — se presentarán en el onboarding.
+    PROHIBIDO: start_experience sin consentimiento de protección de datos.
 
     ────────────────────────────────────────────────
     Screen 5 — ONBOARDING «Antes de empezar, así funciona»
@@ -905,6 +914,11 @@ class Assistant(Agent):
         self, context: RunContext, action: str, dimension_id: str = "", index: int = -1
     ) -> str:
         """Ejecuta una acción disponible en la experiencia.
+        - accept_data_consent: en welcome:ready cuando el visitante acepta
+          el tratamiento / protección de datos (checkbox o «acepto»).
+          Obligatorio antes de start_experience si aparece en availableActions.
+        - start_experience: en welcome:ready SOLO tras consentimiento de datos
+          (cuando start_experience esté en availableActions).
         - open_detail + dimension_id: abre detalle de dimensión (analysis, detail,
           o desde closing:photo_consent|pose|delivered).
         - back: en closing:photo_consent|pose|prep|delivered vuelve a analysis:results.
@@ -1102,8 +1116,14 @@ _USER_VOICE_TOOL_HINT = (
     "vuelta a...», «regresamos a...» ni nada similar sin haber llamado el tool "
     "en ese mismo turno; si lo dices sin llamarlo, el visitante se queda viendo "
     "la misma pantalla mientras tú hablas como si ya hubiera cambiado. "
-    "Si step=welcome y phase=ready y el visitante confirma continuar "
-    "(sí, continúa, adelante, comienza, empezamos, listo, vamos, sigan, dale): "
+    "Si step=welcome y phase=ready: "
+    "1) Si availableActions incluye accept_data_consent y el visitante acepta "
+    "(acepto, de acuerdo, sí acepto, ya marqué el check, autorizo): "
+    "navigate_journey(accept_data_consent) de inmediato. "
+    "2) Si pide continuar SIN consentimiento (sí, continúa, adelante, comienza, "
+    "empezamos, listo, vamos, dale) y accept_data_consent aún está disponible: "
+    "recuerda el check de protección de datos — NO llames start_experience. "
+    "3) Solo cuando start_experience esté en availableActions y confirme continuar: "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
     "Si step=intro y el visitante confirma comenzar "
@@ -1141,6 +1161,10 @@ _USER_VOICE_TOOL_HINT = (
     "Si step=closing y phase=pose|prep|capture y el visitante pide tomar la foto "
     "(toma la foto, listo, estoy listo, adelante, take picture, toma la): "
     "navigate_journey(ready_for_picture) — no solo hables, ejecuta la acción. "
+    "Si step=closing y phase=review (el visitante ve su foto recién tomada) y dice "
+    "sí / me gusta / está bien / úsala / así está bien: navigate_journey(confirm_portrait) "
+    "de inmediato. Si dice no / otra vez / repetir / no me gusta / tomar otra: "
+    "navigate_journey(retake_photo) de inmediato — vuelve a pose. "
     "Si step=closing y phase=thanks y confirma salir "
     "(sí, finalizar, finish, terminamos, listo para salir, yes): "
     "LLAMA navigate_journey(finish) PRIMERO, de inmediato, antes de decir nada — "
@@ -1169,6 +1193,8 @@ def _pantalla_dedupe_key(text: str) -> str:
         return "closing:photo_consent"
     if "closing:photo" in text:
         return "closing:photo"
+    if "closing:review" in text or ("step=closing" in text and "phase=review" in text):
+        return "closing:review"
     if "closing:generating" in text:
         return "closing:generating"
     if "closing:delivered" in text:
@@ -1298,6 +1324,17 @@ def _closing_pantalla_instructions(text: str) -> str | None:
             "con otras palabras mientras esperas a que se coloque, sin importar cuánto "
             "tarde. Si confirman estar listos: navigate_journey(ready_for_picture)."
         )
+    if "closing:review" in text or ("step=closing" in text and "phase=review" in text):
+        return (
+            "CLOSING REVIEW — get_session_state. "
+            "El visitante ya ve en pantalla la foto que se acaba de tomar. "
+            "UNA pregunta corta y cálida: si le gusta esa foto para su tarjeta. "
+            "NUNCA describas ni juzgues la foto — no puedes verla. "
+            "Dila UNA SOLA VEZ y luego SILENCIO — PROHIBIDO repetirla mientras esperas. "
+            "sí / me gusta / está bien / úsala → navigate_journey(confirm_portrait). "
+            "no / otra vez / repetir / no me gusta → navigate_journey(retake_photo) — vuelve a pose. "
+            "Los botones en pantalla también permiten elegir sin hablar."
+        )
     if "closing:generating" in text:
         return (
             "CLOSING GENERATING — get_session_state. "
@@ -1372,19 +1409,21 @@ class _PantallaGuard:
     Owns two independent guards:
     - a short debounce window (`is_duplicate`) that drops truly duplicate
       cues arriving within `_PANTALLA_DEDUPE_SECONDS` of each other.
-    - a "narrated once" set for closing cues (photo, generating, delivered)
-      that must be spoken exactly once per pass through that phase.
+    - a "narrated once" set for closing cues (photo, review, generating,
+      delivered) that must be spoken exactly once per pass through that phase.
 
     Regression: retake_photo sends the visitor through pose → capture →
-    generating → delivered again. Only the "closing:photo" once-key was
-    ever forgotten on retake, so the second pass through generating/
+    review → generating → delivered again. Only the "closing:photo" once-key
+    was ever forgotten on retake, so the second pass through generating/
     delivered was silently swallowed by the once-only guard — the model
     never received fresh navigate_journey(advance) guidance for that
     cycle, so it fell back to improvising ungrounded "sending it now"
     narration in a loop and never actually called the tool (2026-09-02
     RM_SpsHnphyUjch logs: visitor repeated "enviar" many times, agent kept
     saying "se están enviando" without ever navigating). `on_navigate_action`
-    now forgets every closing once-key on retake, not just the pose one.
+    now forgets every closing once-key on retake, not just the pose one —
+    "closing:review" must stay in that set too, or a second pass through
+    review after a retake would silently skip asking about the new photo.
     """
 
     def __init__(self) -> None:
@@ -1414,17 +1453,23 @@ class _PantallaGuard:
         return False
 
     def on_navigate_action(self, action: str) -> None:
-        # retake_photo restarts the closing pose → capture → generating →
-        # delivered cycle. Forget every once-only key in that cycle — not
-        # just "closing:photo" — or the second pass through generating/
-        # delivered is silently skipped and the model never gets fresh
-        # instructions telling it to call navigate_journey(advance).
+        # retake_photo restarts the closing pose → capture → review →
+        # generating → delivered cycle. Forget every once-only key in that
+        # cycle — not just "closing:photo" — or the second pass through
+        # review/generating/delivered is silently skipped and the model
+        # never gets fresh instructions telling it to ask about the new
+        # photo or call navigate_journey(advance).
         if action == "retake_photo":
-            for key in ("closing:photo", "closing:generating", "closing:delivered"):
+            for key in (
+                "closing:photo",
+                "closing:review",
+                "closing:generating",
+                "closing:delivered",
+            ):
                 self.forget_narrated(key)
             logger.info(
                 "[navigate_journey] retake_photo — reset closing pantalla guards "
-                "(photo, generating, delivered)"
+                "(photo, review, generating, delivered)"
             )
 
 
@@ -1987,11 +2032,19 @@ async def my_agent(ctx: JobContext):
                     "[rol], [empresa] o cualquier otro placeholder — son variables internas, NUNCA se dicen. "
                     "PROHIBIDO meta-comentarios: 'vamos a proceder', 'procederé', 'realizaré el saludo'. "
                     "Entra directo al saludo. 2-3 frases: quién es el visitante + qué es Huella Digital. "
+                    "Si availableActions incluye accept_data_consent (o facts.dataConsentRequired): "
+                    "pide marcar el check de protección de datos (o decir «acepto»). "
                     "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
-                    "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso. "
-                    "PARA y espera confirmación del visitante. "
-                    "PASO 2 — solo cuando confirme (sí / continuar / adelante / vamos / dale): "
-                    "llama navigate_journey(start_experience) en ese turno — nunca junto al saludo. "
+                    "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso "
+                    "(salvo accept_data_consent si ya dijo «acepto» en este turno). "
+                    "PARA y espera. "
+                    "PASO 2 — consentimiento: si dice acepto / de acuerdo / autorizo, "
+                    "llama navigate_journey(accept_data_consent). "
+                    "PROHIBIDO start_experience mientras accept_data_consent esté en availableActions. "
+                    "PASO 3 — solo cuando start_experience esté disponible y confirme "
+                    "(sí / continuar / adelante / vamos / dale): "
+                    "llama navigate_journey(start_experience) — nunca junto al saludo inicial, "
+                    "nunca sin consentimiento. "
                     "Tras ok: NO digas nada más en este turno — ni el saludo, ni "
                     "palabras como «silencio» o «esperando», ni ningún comentario "
                     "de cierre. Deja que [pantalla:intro] continúe sola.",
@@ -2103,18 +2156,32 @@ async def my_agent(ctx: JobContext):
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    if use_cartesia:
+    _telemetry_tasks: set[asyncio.Task[None]] = set()
 
-        @session.on("error")
-        def _on_session_error(ev) -> None:
-            err = getattr(ev, "error", ev)
-            logger.error(
-                "session_error type=%s error=%s",
-                type(err).__name__,
-                err,
-                exc_info=isinstance(err, BaseException),
+    def _spawn_telemetry(coro) -> None:
+        task = asyncio.create_task(coro)
+        _telemetry_tasks.add(task)
+        task.add_done_callback(_telemetry_tasks.discard)
+
+    @session.on("error")
+    def _on_session_error(ev) -> None:
+        err = getattr(ev, "error", ev)
+        logger.error(
+            "session_error type=%s error=%s",
+            type(err).__name__,
+            err,
+            exc_info=isinstance(err, BaseException),
+        )
+        event = "throttle" if is_throttle_error(err) else "error"
+        _spawn_telemetry(
+            report_voice_telemetry(
+                event,
+                room=ctx.room.name,
+                detail=f"{type(err).__name__}: {err}",
             )
+        )
 
+    if use_cartesia:
         logger.info(
             "Starting Cartesia plugin tts=%s voice=%s… lang=%s",
             TTS_MODEL,
@@ -2128,6 +2195,29 @@ async def my_agent(ctx: JobContext):
             AWS_REGION,
             NOVA_SESSION_REFRESH_SECONDS,
         )
+
+    _last_usage_tokens = 0
+
+    @session.on("session_usage_updated")
+    def _on_session_usage(ev) -> None:
+        nonlocal _last_usage_tokens
+        usage = getattr(ev, "usage", None)
+        model_usage = getattr(usage, "model_usage", None) or []
+        total = 0
+        for item in model_usage:
+            total += int(getattr(item, "input_tokens", 0) or 0)
+            total += int(getattr(item, "output_tokens", 0) or 0)
+            total += int(getattr(item, "total_tokens", 0) or 0)
+        delta = max(0, total - _last_usage_tokens)
+        _last_usage_tokens = total
+        if delta > 0:
+            _spawn_telemetry(
+                report_voice_telemetry(
+                    "usage",
+                    tokens=delta,
+                    room=ctx.room.name,
+                )
+            )
 
     @session.on("user_input_transcribed")
     def _on_user_speech(event) -> None:
@@ -2205,6 +2295,13 @@ async def my_agent(ctx: JobContext):
         room_options=room_opts,
         record=_telemetry_record_option(),
     )
+
+    await report_voice_telemetry("session_start", room=ctx.room.name)
+
+    async def _report_session_end() -> None:
+        await report_voice_telemetry("session_end", room=ctx.room.name)
+
+    ctx.add_shutdown_callback(_report_session_end)
 
     await ctx.connect()
 

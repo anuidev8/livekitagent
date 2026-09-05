@@ -15,6 +15,7 @@ JourneyAction = Literal[
     "advance",
     "back",
     "start_experience",
+    "accept_data_consent",
     "start_analysis",
     "reveal_results",
     "open_detail",

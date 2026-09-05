@@ -376,7 +376,7 @@ From `availableLegacyActions`:
 |---------|-------------------|
 | attract | `start_experience` |
 | welcome preparing | `back`, `cancel` |
-| welcome ready | `start_experience`, `back`, `cancel` |
+| welcome ready | `accept_data_consent` (until checkbox), then `start_experience`, `back`, `cancel` |
 | intro | `advance`, `back`, `start_analysis`, `cancel` |
 | analysis scanning | `back` |
 | analysis complete | `reveal_results`, `back` |
@@ -457,7 +457,9 @@ Legacy `huella-guide/src/tasks/*` still encodes an older auto-tour choreography 
 
 1. Prep targets via `welcome_preparation` indices
 2. When phase `ready`, greet using profile from snapshot / presentation
-3. Confirm → `start_experience` again (now meaning “enter intro”)
+3. If `availableActions` includes `accept_data_consent`: ask for the data-protection
+   checkbox (or «acepto») → `navigate_journey({ action: "accept_data_consent" })`
+4. Confirm continue → `start_experience` (now meaning “enter intro”) — never without consent
 
 ### Intro
 

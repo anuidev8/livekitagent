@@ -520,6 +520,11 @@ def test_analysis_results_return_is_brief() -> None:
     assert "PROHIBIDO" in text
 
 
+def test_pantalla_dedupe_key_closing_review() -> None:
+    key = _pantalla_dedupe_key("[pantalla:closing:review] step=closing phase=review.")
+    assert key == "closing:review"
+
+
 def test_pantalla_dedupe_key_analysis_scanning() -> None:
     key = _pantalla_dedupe_key(
         "[pantalla:analysis:scanning] UI step=analysis phase=scanning."
@@ -644,6 +649,52 @@ def test_retake_photo_resets_generating_and_delivered_guards() -> None:
     guard.on_navigate_action("retake_photo")
 
     assert not guard.already_narrated("closing:photo")
+    assert not guard.already_narrated("closing:generating")
+    assert not guard.already_narrated("closing:delivered")
+
+
+def test_closing_review_asks_once_and_never_claims_to_see_the_photo() -> None:
+    """The frontend's `review` phase (huella-digital ClosingView.tsx) shows the
+    just-captured photo and waits for confirm_portrait/retake_photo before the
+    card is built. The agent cannot see the photo — it must ask a single
+    yes/no question and route the answer to the right tool, never describe
+    or judge the image itself (that would be a hallucination)."""
+    review = _closing_pantalla_instructions(
+        "[pantalla:closing:review] step=closing phase=review"
+    )
+    assert review is not None
+    assert "navigate_journey(confirm_portrait)" in review
+    assert "navigate_journey(retake_photo)" in review
+    assert "no puedes verla" in review
+    assert "UNA SOLA VEZ" in review
+
+    hint = _USER_VOICE_TOOL_HINT
+    idx = hint.find("phase=review")
+    assert idx != -1
+    snippet = hint[idx : idx + 260]
+    assert "navigate_journey(confirm_portrait)" in snippet
+    assert "navigate_journey(retake_photo)" in snippet
+
+
+def test_retake_photo_resets_review_guard_too() -> None:
+    """Same regression class as test_retake_photo_resets_generating_and_delivered_guards,
+    but for the new `review` step inserted between capture and generating: a
+    visitor who retakes their photo from `delivered` walks pose → capture →
+    review → generating → delivered again. If "closing:review" isn't forgotten
+    on retake_photo, the once-only guard would silently skip asking about the
+    NEW photo the second time through review.
+    """
+    guard = _PantallaGuard()
+
+    guard.mark_narrated("closing:photo")
+    guard.mark_narrated("closing:review")
+    guard.mark_narrated("closing:generating")
+    guard.mark_narrated("closing:delivered")
+
+    guard.on_navigate_action("retake_photo")
+
+    assert not guard.already_narrated("closing:photo")
+    assert not guard.already_narrated("closing:review")
     assert not guard.already_narrated("closing:generating")
     assert not guard.already_narrated("closing:delivered")
 
@@ -897,3 +948,47 @@ async def test_answer_seti_question_tool_delegates_to_knowledge_base() -> None:
         context=None, query="¿qué servicios ofrece SETI?"
     )
     assert "Desarrollo" in result or "PRIME" in result
+
+
+def test_welcome_ready_requires_data_consent_before_start() -> None:
+    """Welcome ready must gate start_experience behind accept_data_consent."""
+    assert "accept_data_consent" in NOVA_INSTRUCTIONS
+    assert "PROHIBIDO: start_experience sin consentimiento" in NOVA_INSTRUCTIONS
+    assert "accept_data_consent" in _USER_VOICE_TOOL_HINT
+    assert "protección de datos" in _USER_VOICE_TOOL_HINT
+
+    from tasks.welcome_orchestrator import build_welcome_instructions
+
+    with_consent = build_welcome_instructions(
+        {
+            "step": "welcome",
+            "phase": "ready",
+            "availableActions": ["accept_data_consent", "back", "cancel"],
+            "facts": {
+                "name": "Ana Pérez",
+                "role": "CTO",
+                "company": "SETI",
+                "dataConsentRequired": True,
+            },
+        }
+    )
+    assert "protección de datos" in with_consent
+    assert "navigate_journey" in with_consent  # forbidden wording present
+    assert "PROHIBIDO llamar navigate_journey" in with_consent
+
+    after_consent = build_welcome_instructions(
+        {
+            "step": "welcome",
+            "phase": "ready",
+            "availableActions": ["start_experience", "back", "cancel"],
+            "facts": {
+                "name": "Ana Pérez",
+                "role": "CTO",
+                "company": "SETI",
+                "dataConsentAccepted": True,
+                "dataConsentRequired": False,
+            },
+        }
+    )
+    assert "¿Vemos cómo funciona?" in after_consent or "cómo funciona" in after_consent
+    assert "protección de datos" not in after_consent

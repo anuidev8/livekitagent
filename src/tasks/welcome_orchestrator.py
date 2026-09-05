@@ -1,4 +1,4 @@
-"""Welcome greeting then atomic welcome→intro transition via RPC."""
+"""Welcome greeting on welcome:ready — waits for data consent before intro."""
 
 from __future__ import annotations
 
@@ -17,19 +17,47 @@ logger = logging.getLogger("agent.welcome_orchestrator")
 _active_task: asyncio.Task[None] | None = None
 
 
+def _consent_required(state: dict[str, Any]) -> bool:
+    """True when UI still needs accept_data_consent before start_experience."""
+    facts = state.get("facts") if isinstance(state.get("facts"), dict) else {}
+    if facts.get("dataConsentRequired") is True:
+        return True
+    if facts.get("dataConsentAccepted") is True:
+        return False
+    actions = state.get("availableActions") or []
+    if isinstance(actions, list) and "accept_data_consent" in actions:
+        return True
+    if isinstance(actions, list) and "start_experience" in actions:
+        return False
+    # Default safe: assume consent gate is on until proven otherwise.
+    return True
+
+
 def build_welcome_instructions(state: dict[str, Any]) -> str:
     facts = state.get("facts") if isinstance(state.get("facts"), dict) else {}
     identity = {
         key: str(facts.get(key) or "").strip()
         for key in ("name", "role", "company", "industry")
     }
-    return (
+    base = (
         "Compón un saludo original en español para esta identidad: "
         f"{json.dumps(identity, ensure_ascii=False)}. "
         "Usa el nombre una sola vez; integra cargo y empresa con naturalidad. "
         "En 2 o 3 frases breves explica que Huella Digital explorará su presencia "
-        "pública, fortalezas y oportunidades, e invita a conocer cómo funciona. "
-        "No uses herramientas, no leas un guion literal y no repitas saludos anteriores."
+        "pública, fortalezas y oportunidades. "
+        "No uses herramientas, no leas un guion literal y no repitas saludos anteriores. "
+    )
+    if _consent_required(state):
+        return (
+            base
+            + "Cierra pidiendo que marque el check de protección de datos en pantalla "
+            "(o diga «acepto»). NO digas que vas a avanzar todavía. "
+            "PROHIBIDO llamar navigate_journey en este saludo."
+        )
+    return (
+        base
+        + "Invita a conocer cómo funciona («¿Vemos cómo funciona?»). "
+        "PROHIBIDO llamar navigate_journey en este saludo."
     )
 
 
@@ -41,15 +69,8 @@ def schedule_welcome(session: AgentSession) -> bool:
     return True
 
 
-async def _navigate_to_intro() -> None:
-    result = json.loads(
-        await rpc("navigate_journey", {"action": "start_experience"}, retries=2)
-    )
-    if result.get("ok") is False:
-        raise RuntimeError(f"welcome transition rejected: {result}")
-
-
 async def _run_welcome(session: AgentSession) -> None:
+    """Greet on welcome:ready, then stop — consent + start are visitor-driven."""
     await kill_agent_speech(session)
     session.input.set_audio_enabled(False)
     spoke = False
@@ -72,19 +93,18 @@ async def _run_welcome(session: AgentSession) -> None:
             await handle.wait_for_playout()
             spoke = True
         except Exception:
-            logger.exception("welcome speech failed — continuing to intro transition")
+            logger.exception("welcome speech failed — leaving mic open for visitor")
 
         await wait_for_agent_idle(session)
-        await _navigate_to_intro()
-        logger.info("welcome delivered (spoke=%s); navigated to intro", spoke)
+        # Do NOT auto-call start_experience: SHOW_DATA_CONSENT requires an
+        # affirmative checkbox / accept_data_consent before intro.
+        logger.info(
+            "welcome delivered (spoke=%s); waiting for consent/start via voice or touch",
+            spoke,
+        )
     except asyncio.CancelledError:
         raise
     except Exception:
         logger.exception("welcome orchestrator failed")
-        try:
-            await _navigate_to_intro()
-            logger.info("welcome fallback navigate_to_intro succeeded after failure")
-        except Exception:
-            logger.exception("welcome fallback navigate_to_intro also failed")
     finally:
         session.input.set_audio_enabled(True)
