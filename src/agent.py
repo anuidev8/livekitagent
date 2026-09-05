@@ -32,7 +32,12 @@ from livekit.agents import (
 from livekit.plugins import ai_coustics, cartesia
 
 from knowledge_base import search_seti_knowledge
-from moderator_telemetry import is_throttle_error, report_voice_telemetry
+from moderator_telemetry import (
+    is_throttle_error,
+    job_dispatch_meta,
+    report_voice_telemetry,
+    usage_deltas_from_event,
+)
 from narration_barrier import NarrationBarrier, set_session_narration_barrier
 from nova_session_continuation import (
     install_nova_session_continuation_fix,
@@ -67,12 +72,19 @@ if not getattr(_root_logger, "_huella_guide_log_configured", False):
     _LOGS_DIR = Path(__file__).parent.parent / "logs"
     _LOGS_DIR.mkdir(exist_ok=True)
 
-    _LOG_FILE = _LOGS_DIR / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    _log_started = datetime.now().astimezone()
+    _LOG_FILE = (
+        _LOGS_DIR
+        / f"{_log_started.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    )
 
     _file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
     _file_handler.setLevel(logging.DEBUG)
     _file_handler.setFormatter(
-        logging.Formatter("%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+        logging.Formatter(
+            fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
     )
 
     # Attach to the root logger so ALL livekit / agent log lines are captured.
@@ -83,6 +95,13 @@ if not getattr(_root_logger, "_huella_guide_log_configured", False):
     _all_logs = sorted(_LOGS_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
     for _old in _all_logs[:-30]:
         _old.unlink(missing_ok=True)
+
+    logging.getLogger("agent").info(
+        "log file opened path=%s started_at=%s tz=%s",
+        _LOG_FILE,
+        _log_started.isoformat(timespec="seconds"),
+        _log_started.tzname() or _log_started.strftime("%z"),
+    )
 # ─────────────────────────────────────────────────────────────────────────────
 
 # FIXED (2026-09-02, RM_vZnfXrLvRboG logs): a recycle landing mid-conversation
@@ -2157,6 +2176,8 @@ async def my_agent(ctx: JobContext):
     # ──────────────────────────────────────────────────────────────────────────
 
     _telemetry_tasks: set[asyncio.Task[None]] = set()
+    _dispatch_meta = job_dispatch_meta(ctx)
+    _kiosk_id = str(_dispatch_meta.get("kioskId") or "").strip() or None
 
     def _spawn_telemetry(coro) -> None:
         task = asyncio.create_task(coro)
@@ -2177,6 +2198,7 @@ async def my_agent(ctx: JobContext):
             report_voice_telemetry(
                 event,
                 room=ctx.room.name,
+                kiosk_id=_kiosk_id,
                 detail=f"{type(err).__name__}: {err}",
             )
         )
@@ -2196,28 +2218,30 @@ async def my_agent(ctx: JobContext):
             NOVA_SESSION_REFRESH_SECONDS,
         )
 
-    _last_usage_tokens = 0
+    _usage_totals = {"input": 0, "output": 0, "tokens": 0, "characters": 0}
 
     @session.on("session_usage_updated")
     def _on_session_usage(ev) -> None:
-        nonlocal _last_usage_tokens
-        usage = getattr(ev, "usage", None)
-        model_usage = getattr(usage, "model_usage", None) or []
-        total = 0
-        for item in model_usage:
-            total += int(getattr(item, "input_tokens", 0) or 0)
-            total += int(getattr(item, "output_tokens", 0) or 0)
-            total += int(getattr(item, "total_tokens", 0) or 0)
-        delta = max(0, total - _last_usage_tokens)
-        _last_usage_tokens = total
-        if delta > 0:
-            _spawn_telemetry(
-                report_voice_telemetry(
-                    "usage",
-                    tokens=delta,
-                    room=ctx.room.name,
-                )
+        nonlocal _usage_totals
+        _usage_totals, deltas = usage_deltas_from_event(ev, _usage_totals)
+        if (
+            deltas["tokens"] <= 0
+            and deltas["characters"] <= 0
+            and deltas["input"] <= 0
+            and deltas["output"] <= 0
+        ):
+            return
+        _spawn_telemetry(
+            report_voice_telemetry(
+                "usage",
+                tokens=deltas["tokens"] or None,
+                input_tokens=deltas["input"] or None,
+                output_tokens=deltas["output"] or None,
+                characters=deltas["characters"] or None,
+                room=ctx.room.name,
+                kiosk_id=_kiosk_id,
             )
+        )
 
     @session.on("user_input_transcribed")
     def _on_user_speech(event) -> None:
@@ -2296,10 +2320,14 @@ async def my_agent(ctx: JobContext):
         record=_telemetry_record_option(),
     )
 
-    await report_voice_telemetry("session_start", room=ctx.room.name)
+    await report_voice_telemetry(
+        "session_start", room=ctx.room.name, kiosk_id=_kiosk_id
+    )
 
     async def _report_session_end() -> None:
-        await report_voice_telemetry("session_end", room=ctx.room.name)
+        await report_voice_telemetry(
+            "session_end", room=ctx.room.name, kiosk_id=_kiosk_id
+        )
 
     ctx.add_shutdown_callback(_report_session_end)
 
