@@ -620,14 +620,15 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     - capture / shutter: UNA frase MUY corta al iniciar el contador (ánimo /
       quédate así / sonríe) — UNA vez, luego SILENCIO. PROHIBIDO contar 3-2-1
       en voz y PROHIBIDO el mensaje SETI (solo en generating).
-    - generating: UNA locución — abre con «Mientras se genera tu tarjeta,» (o
-      «Mientras tanto,») y di el mensaje de propósito de SETI (entendemos el
-      negocio antes de proponer solución; la tecnología genera valor ante
-      desafíos reales; crecemos para nuestros clientes). Dila UNA SOLA VEZ
-      y luego SILENCIO. PROHIBIDO «componiendo / armando / diseñando».
-      PROHIBIDO decir o insinuar que la tarjeta/informe YA están listos o
-      generados — eso NO es verdad todavía; solo cuando llegue
-      [pantalla:closing:delivered]. PROHIBIDO pedir tomar foto.
+    - generating: NO improvises ni anticipes aquí el mensaje de SETI — la
+      instrucción específica que llega con [pantalla:closing:generating] ya
+      trae ese mensaje completo para UNA sola locución; seguir esta regla
+      general A LA VEZ que esa instrucción puntual es lo que produce el
+      mensaje de SETI DOS VECES en el mismo turno. Espera esa instrucción y
+      dila tal cual, UNA SOLA VEZ, y luego SILENCIO. PROHIBIDO «componiendo /
+      armando / diseñando». PROHIBIDO decir o insinuar que la tarjeta/informe
+      YA están listos o generados — eso NO es verdad todavía; solo cuando
+      llegue [pantalla:closing:delivered]. PROHIBIDO pedir tomar foto.
     - delivered: UNA locución al entrar — invita a revisar la tarjeta e indica que informe
       e imagen van juntos a su correo. Si facts.photoSkipped es true, ofrece
       «Enviar reporte» o tomarse una foto para su tarjeta (navigate_journey(retake_photo)
