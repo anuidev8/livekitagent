@@ -311,6 +311,32 @@ def test_session_reconnected_instructions_force_resync_before_anything_else() ->
     assert "nunca lo menciones" in instructions.lower()
 
 
+def test_session_reconnected_instructions_reanchor_seti_question_handling() -> None:
+    """Regression (2026-09-08, RM_NouknjNQXa5s logs): a Nova recycle landed
+    right as the visitor entered closing:thanks and kept asking about SETI
+    ("qué hace SETI", "dime los servicios"). Post-reconnect, the guide
+    answered from stale memory a couple of times, then started refusing with
+    banned phrases ("Lo siento, pero no puedo responder preguntas sobre mis
+    propias funciones o capacidades") — misreading a 2nd-person "qué haces"
+    about the company as a question about itself. The reconnect reinforcement
+    only re-anchored screen/tool state, never the SETI-question contract or
+    the anti-refusal rule, so both silently lapsed for the rest of the
+    session. Both must be re-asserted every time the session reconnects, not
+    just once at the start of the call — SETI context has to hold up
+    anywhere in the flow, not only where it first came up."""
+    instructions = _SESSION_RECONNECTED_INSTRUCTIONS
+    assert "answer_seti_question" in instructions
+    assert "segunda persona" in instructions.lower()
+    assert "no sobre ti" in instructions.lower()
+    assert "lo siento" in instructions.lower()
+    assert "no puedo responder" in instructions.lower()
+    # Must still come after the get_session_state-first reinforcement, not
+    # replace it.
+    assert instructions.index("get_session_state") < instructions.index(
+        "answer_seti_question"
+    )
+
+
 @pytest.mark.skip(
     reason="Requires LiveKit Inference credits; Nova is the only voice backend."
 )

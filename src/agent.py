@@ -426,8 +426,8 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
     PASO 2 — Consentimiento de datos (OBLIGATORIO si accept_data_consent está en
        availableActions): llama navigate_journey(accept_data_consent) SOLO cuando el
        visitante use una palabra de consentimiento EXPLÍCITA referida a los datos —
-       «acepto», «sí, acepto», «acepto el tratamiento», «autorizo», «de acuerdo» — o
-       confirme que marcó el check.
+       «acepto», «sí, acepto», «acepto el tratamiento», «autorizo», «de acuerdo»,
+       «confirmo», «sí, confirmo» — o confirme que marcó el check.
        CONFUSIÓN PROHIBIDA: un «sí» suelto, o palabras de continuar como «comenzar»,
        «empecemos», «empezamos», «adelante», «vamos», «dale», «listo», «continuar»
        — INCLUSO combinadas con «sí» (p. ej. «sí, comencemos», «sí eh comenzar») —
@@ -436,7 +436,7 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
        SIGUE en availableActions (o sea, aún no ha aceptado), NO llames
        accept_data_consent ni start_experience: pregunta explícitamente el
        consentimiento («¿Aceptas el tratamiento de tus datos personales?») y ESPERA
-       una respuesta con «acepto»/«autorizo»/«de acuerdo».
+       una respuesta con «acepto»/«autorizo»/«de acuerdo»/«confirmo».
        PROHIBIDO start_experience mientras accept_data_consent siga en availableActions.
     PASO 3 — Después de que el consentimiento esté hecho (start_experience en
        availableActions) y el visitante confirme continuar / adelante / seguimos /
@@ -670,12 +670,21 @@ NOVA_INSTRUCTIONS = textwrap.dedent(
 
     PREGUNTAS SOBRE DATOS / PRIVACIDAD:
     Si el visitante pregunta qué pasa con su información o sobre el
-    consentimiento que aceptó: responde breve — se usa su información
-    profesional pública para el análisis de marca personal, y la foto del
-    stand SOLO si la autorizó aparte (nunca es obligatoria para participar).
-    Para más detalle o para ejercer sus derechos, remite al documento que
-    firmó al ingresar o a legal@seti.com.co. No inventes detalles que no
-    estén aquí.
+    consentimiento que aceptó: responde breve — Corficolombiana y SETI usan
+    tu información profesional pública (nombre, cargo, empresa) para armar
+    tu perfil de marca personal, que ves en el stand y recibes en un
+    informe por correo. La foto es un consentimiento SEPARADO y siempre
+    opcional — no afecta el resto de tu participación si no la autorizas.
+    Esto es exclusivo de esta experiencia, no toca ninguna otra
+    autorización que tengas con Corficolombiana. Para el detalle completo
+    — tus derechos, cuánto se conservan los datos, a quién se transmiten —
+    invita a tocar «Ver autorización completa» en pantalla. No inventes
+    detalles que no estén aquí.
+    Si accept_data_consent SIGUE en availableActions (aún no ha aceptado):
+    termina tu respuesta retomando la pregunta original — «¿Aceptas el
+    tratamiento de tus datos personales?» — y espera su «acepto»/«autorizo»/
+    «de acuerdo»/«confirmo» antes de llamar accept_data_consent. NO asumas que
+    preguntar sobre la política equivale a aceptar ni a rechazar.
 
     FUERA DE TEMA:
     Si el visitante habla de algo completamente ajeno a la experiencia
@@ -949,7 +958,7 @@ class Assistant(Agent):
         """Ejecuta una acción disponible en la experiencia.
         - accept_data_consent: en welcome:ready SOLO cuando el visitante da
           consentimiento EXPLÍCITO al tratamiento de datos — checkbox marcado
-          o dice «acepto»/«autorizo»/«de acuerdo». Un «sí» suelto o palabras
+          o dice «acepto»/«autorizo»/«de acuerdo»/«confirmo». Un «sí» suelto o palabras
           de continuar («comenzar», «empezamos», «adelante», «vamos», «dale»,
           «listo») NO son consentimiento, ni siquiera combinadas con «sí».
           Obligatorio antes de start_experience si aparece en availableActions.
@@ -1155,7 +1164,8 @@ _USER_VOICE_TOOL_HINT = (
     "Si step=welcome y phase=ready: "
     "1) Si availableActions incluye accept_data_consent Y el visitante usa una "
     "palabra de consentimiento EXPLÍCITA (acepto, de acuerdo, sí acepto, ya marqué "
-    "el check, autorizo, acepto el tratamiento): navigate_journey(accept_data_consent) "
+    "el check, autorizo, acepto el tratamiento, confirmo, sí confirmo): "
+    "navigate_journey(accept_data_consent) "
     "de inmediato. "
     "2) CONFUSIÓN PROHIBIDA — un «sí» suelto, o palabras de continuar (continúa, "
     "adelante, comienza, comenzar, empezamos, listo, vamos, dale) NUNCA cuentan "
@@ -1164,7 +1174,7 @@ _USER_VOICE_TOOL_HINT = (
     "accept_data_consent aún está disponible: NO llames accept_data_consent ni "
     "start_experience — pregunta explícitamente «¿Aceptas el tratamiento de tus "
     "datos personales conforme a la política de protección de datos?» y espera "
-    "una respuesta con acepto/autorizo/de acuerdo. "
+    "una respuesta con acepto/autorizo/de acuerdo/confirmo. "
     "3) Solo cuando start_experience esté en availableActions y confirme continuar: "
     "navigate_journey(start_experience) de inmediato tras UNA frase de cierre breve — "
     "no re-narres las dimensiones ni repitas el saludo completo. "
@@ -1598,7 +1608,15 @@ _SESSION_RECONNECTED_INSTRUCTIONS = (
     "la mencionaste en voz. A partir de aquí sigue el contrato normal: "
     "get_session_state en cada turno, present_content si hace falta, "
     "navigate_journey solo cuando el visitante confirme una acción de "
-    "availableActions."
+    "availableActions. Esto incluye las preguntas sobre SETI: si el "
+    "visitante pregunta qué es o qué hace SETI — incluso si lo dice en "
+    "segunda persona («qué haces», «a qué te dedicas», «sabes qué hace») "
+    "sigue siendo una pregunta sobre la empresa, no sobre ti — llama "
+    "answer_seti_question igual que harías sin haber reconectado. "
+    "PROHIBIDO ABSOLUTO decir «lo siento», «no puedo responder» o negarte a "
+    "responder por tratarse supuestamente de tus propias funciones o "
+    "capacidades — esa regla sigue vigente después de reconectar tanto "
+    "como antes."
 )
 
 
@@ -2086,12 +2104,13 @@ async def my_agent(ctx: JobContext):
                     "— o pide marcar el check de protección de datos. "
                     "PROHIBIDO nombrar o listar las cinco dimensiones en esta bienvenida. "
                     "PROHIBIDO present_content. PROHIBIDO navigate_journey en este paso "
-                    "(salvo accept_data_consent si ya dijo acepto/autorizo/de acuerdo EXPLÍCITAMENTE "
-                    "en este turno — un «sí» suelto o «comenzar/empezamos/adelante/vamos/dale/listo», "
-                    "incluso junto a «sí», NO cuenta como consentimiento). "
+                    "(salvo accept_data_consent si ya dijo acepto/autorizo/de acuerdo/confirmo "
+                    "EXPLÍCITAMENTE en este turno — un «sí» suelto o «comenzar/empezamos/adelante/"
+                    "vamos/dale/listo», incluso junto a «sí», NO cuenta como consentimiento). "
                     "PARA y espera. "
-                    "PASO 2 — consentimiento: si dice acepto / de acuerdo / autorizo (no un «sí» "
-                    "genérico ni una palabra de continuar), llama navigate_journey(accept_data_consent). "
+                    "PASO 2 — consentimiento: si dice acepto / de acuerdo / autorizo / confirmo "
+                    "(no un «sí» genérico ni una palabra de continuar), llama "
+                    "navigate_journey(accept_data_consent). "
                     "Si dice solo una palabra de continuar sin esas palabras de consentimiento: "
                     "NO llames accept_data_consent — pregunta el consentimiento explícito y espera. "
                     "PROHIBIDO start_experience mientras accept_data_consent esté en availableActions. "
